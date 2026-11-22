@@ -91,58 +91,161 @@ class QuranStore {
 }
 
 class AudioLibrary {
-  static final Map<String, String> _externalServers = {};
-  static final Map<String, Set<int>> _externalSurahs = {};
+  static final Map<String, String> _externalServers = {
+    'mp3quran_ali_jaber': 'https://cdn.mp3quran.net/download/audio/ali-jaber/r1/',
+  };
+  static final Map<String, Set<int>> _externalSurahs = {
+    'mp3quran_ali_jaber': Set<int>.from(List<int>.generate(114, (index) => index + 1)),
+  };
+  static final Map<String, String> _editionReplacements = {};
   static bool _requestedCatalogLoaded = false;
+  static bool _catalogLoadInProgress = false;
 
-  static Future<void> loadRequestedReciters() async {
-    if (_requestedCatalogLoaded) return;
+  /// Loads the complete Arabic MP3Quran catalogue, not a hard-coded shortlist.
+  /// One best moshaf is selected for each reciter (full 114-surah editions first).
+  static Future<bool> loadRequestedReciters({bool force = false}) async {
+    if (_requestedCatalogLoaded && !force) return true;
+    if (_catalogLoadInProgress) return false;
+    _catalogLoadInProgress = true;
     try {
-      final response = await http.get(Uri.parse('https://mp3quran.net/api/v3/reciters?language=ar')).timeout(const Duration(seconds: 20));
-      if (response.statusCode != 200) throw HttpException('MP3Quran HTTP ${response.statusCode}');
-      final decoded = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
-      final rows = (decoded['reciters'] as List<dynamic>? ?? []);
-      const requested = <String>['خالد الجليل', 'ماهر المعيقلي', 'بدر التركي'];
-      reciters.removeWhere((item) => item['source'] == 'mp3quran');
-      for (final target in requested) {
-        Map<String, dynamic>? reader;
-        final normalizedTarget = normalizeArabic(target);
-        for (final raw in rows) {
-          if (raw is! Map<String, dynamic>) continue;
-          final normalizedName = normalizeArabic(raw['name']?.toString() ?? '');
-          if (normalizedName == normalizedTarget ||
-              normalizedName.contains(normalizedTarget) ||
-              normalizedTarget.contains(normalizedName)) {
-            reader = raw;
-            if (normalizedName == normalizedTarget) break;
-          }
-        }
-        if (reader == null) continue;
-        final moshafs = (reader['moshaf'] as List<dynamic>? ?? []).whereType<Map<String, dynamic>>().toList();
-        Map<String, dynamic>? selected;
-        for (final moshaf in moshafs) {
-          final count = int.tryParse(moshaf['surah_total']?.toString() ?? '') ?? 0;
-          final title = moshaf['name']?.toString() ?? '';
-          if (count >= 114 && (title.contains('حفص') || selected == null)) { selected = moshaf; if (title.contains('حفص')) break; }
-        }
-        if (selected == null) continue;
-        final server = selected['server']?.toString();
-        if (server == null || !server.startsWith('https://')) continue;
-        final moshafId = selected['id']?.toString();
-        if (moshafId == null || moshafId.isEmpty) continue;
-        final edition = 'mp3quran_$moshafId';
-        _externalServers[edition] = server.endsWith('/') ? server : '$server/';
-        final rawSurahs = selected['surah_list']?.toString() ?? '';
-        _externalSurahs[edition] = rawSurahs.split(',').map((v) => int.tryParse(v.trim())).whereType<int>().toSet();
-        reciters.add({'name': target, 'edition': edition, 'bitrate': 'API', 'source': 'mp3quran'});
+      final uri = Uri.https('www.mp3quran.net', '/api/v3/reciters', {'language': 'ar'});
+      final response = await http.get(uri, headers: const {
+        'Accept': 'application/json',
+        'User-Agent': 'Sakinah-Quran-App/2.3',
+      }).timeout(const Duration(seconds: 25));
+      if (response.statusCode != 200) {
+        throw HttpException('MP3Quran HTTP ${response.statusCode}');
       }
+
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is! Map || decoded['reciters'] is! List) {
+        throw const FormatException('صيغة فهرس القراء غير معروفة');
+      }
+
+      final additions = <Map<String, String>>[];
+      final newServers = <String, String>{};
+      final newSurahs = <String, Set<int>>{};
+      final newEditionReplacements = <String, String>{};
+      final apiNames = <String>{};
+
+      for (final rawReader in decoded['reciters'] as List) {
+        if (rawReader is! Map) continue;
+        final reader = Map<String, dynamic>.from(rawReader);
+        final readerName = (reader['name'] ?? '').toString().trim();
+        if (readerName.isEmpty) continue;
+        final normalizedName = normalizeArabic(readerName);
+        if (normalizedName.isEmpty) continue;
+
+        final rawMoshafs = reader['moshaf'];
+        if (rawMoshafs is! List) continue;
+        final candidates = <({Map<String, dynamic> data, String server, Set<int> surahs, int score})>[];
+
+        for (final rawMoshaf in rawMoshafs) {
+          if (rawMoshaf is! Map) continue;
+          final moshaf = Map<String, dynamic>.from(rawMoshaf);
+          final rawServer = (moshaf['server'] ?? '').toString().trim();
+          var serverUri = Uri.tryParse(rawServer);
+          if (serverUri == null || serverUri.host.isEmpty ||
+              (serverUri.scheme != 'https' && serverUri.scheme != 'http')) {
+            continue;
+          }
+          // Prefer HTTPS when a provider returns an old HTTP URL.
+          if (serverUri.scheme == 'http') serverUri = serverUri.replace(scheme: 'https');
+
+          final moshafId = (moshaf['id'] ?? '').toString().trim();
+          if (moshafId.isEmpty) continue;
+
+          final rawList = (moshaf['surah_list'] ?? '').toString();
+          var available = rawList
+              .split(',')
+              .map((value) => int.tryParse(value.trim()))
+              .whereType<int>()
+              .where((number) => number >= 1 && number <= 114)
+              .toSet();
+          final total = int.tryParse((moshaf['surah_total'] ?? '').toString()) ?? 0;
+          if (available.isEmpty && total == 114) {
+            available = Set<int>.from(List<int>.generate(114, (index) => index + 1));
+          }
+          if (available.isEmpty) continue;
+
+          final title = (moshaf['name'] ?? '').toString();
+          final isHafs = normalizeArabic(title).contains('حفص');
+          final score = available.length * 10 + (isHafs ? 5 : 0) + (available.length == 114 ? 1000 : 0);
+          candidates.add((data: moshaf, server: serverUri.toString(), surahs: available, score: score));
+        }
+        if (candidates.isEmpty) continue;
+        candidates.sort((a, b) => b.score.compareTo(a.score));
+        final selected = candidates.first;
+        final moshafId = (selected.data['id'] ?? '').toString().trim();
+        final readerId = (reader['id'] ?? readerName).toString().trim();
+        final edition = 'mp3quran_${readerId}_$moshafId';
+        final moshafTitle = (selected.data['name'] ?? '').toString().trim();
+        final displayName = moshafTitle.isEmpty || candidates.length == 1
+            ? readerName
+            : '$readerName · $moshafTitle';
+
+        newServers[edition] = selected.server.endsWith('/') ? selected.server : '${selected.server}/';
+        newSurahs[edition] = selected.surahs;
+        additions.add({
+          'name': displayName,
+          'edition': edition,
+          'bitrate': 'API',
+          'source': 'mp3quran',
+        });
+        for (final oldReader in reciters.where((item) =>
+            item['source'] != 'mp3quran' &&
+            normalizeArabic(item['name'] ?? '') == normalizedName)) {
+          final oldEdition = oldReader['edition'];
+          if (oldEdition != null) newEditionReplacements[oldEdition] = edition;
+        }
+        apiNames.add(normalizedName);
+      }
+
+      if (additions.isEmpty) throw const FormatException('لم يعثر المصدر على مصاحف صوتية صالحة');
+
+      // Replace matching static editions with the API-hosted edition, while
+      // keeping other static editions as an offline/catalog fallback.
+      reciters.removeWhere((item) => item['source'] == 'mp3quran' ||
+          apiNames.contains(normalizeArabic(item['name'] ?? '')));
+      _externalServers
+        ..clear()
+        ..addAll(newServers);
+      _externalSurahs
+        ..clear()
+        ..addAll(newSurahs);
+      _editionReplacements
+        ..clear()
+        ..addAll(newEditionReplacements);
+      reciters.addAll(additions);
+      reciters.sort((a, b) => normalizeArabic(a['name'] ?? '')
+          .compareTo(normalizeArabic(b['name'] ?? '')));
       _requestedCatalogLoaded = true;
+      return true;
     } catch (_) {
-      // Keep the verified AlQuran Cloud readers available when the device is offline.
+      // Static AlQuran Cloud readers remain available if the API/network is down.
+      // Keep the flag false so opening the recitation page can retry later.
+      return false;
+    } finally {
+      _catalogLoadInProgress = false;
     }
   }
 
+  static String resolveEdition(String edition) => _editionReplacements[edition] ?? edition;
+
   static Set<int>? availableSurahs(String edition) => _externalSurahs[edition];
+
+  static List<int> surahNumbersFor(String edition) {
+    final allowed = _externalSurahs[edition];
+    if (allowed == null) return List<int>.generate(114, (index) => index + 1);
+    final result = allowed.toList()..sort();
+    return result;
+  }
+
+  static int preferredSurahFor(String edition, int requested) {
+    final numbers = surahNumbersFor(edition);
+    if (numbers.isEmpty) return 1;
+    return numbers.contains(requested) ? requested : numbers.first;
+  }
 
   static Future<Directory> _dir() async {
     final root = await getApplicationSupportDirectory();
@@ -250,18 +353,17 @@ class AudioLibrary {
     String edition, {
     required void Function(int, int, int?, int?) onProgress,
   }) async {
-    final allowed = _externalSurahs[edition];
-    if (allowed != null && allowed.length < 114) {
-      throw const FormatException('هذا الإصدار لا يحتوي على جميع سور القرآن؛ يمكن تنزيل السور المتاحة منفردة.');
-    }
-    for (var number = 1; number <= 114; number++) {
+    final numbers = surahNumbersFor(edition);
+    if (numbers.isEmpty) throw const FormatException('لا توجد سور متاحة لهذا المصحف الصوتي.');
+    for (var index = 0; index < numbers.length; index++) {
+      final number = numbers[index];
       final marker = await reciterDir(edition);
       final destination = File('${marker.parent.path}/${number.toString().padLeft(3, '0')}.mp3');
       if (!await destination.exists() || await destination.length() <= 1024) {
         await downloadResumable(surahAudioUrl(number, edition), destination,
-            onProgress: (received, total) => onProgress(number, 114, received, total));
+            onProgress: (received, total) => onProgress(index + 1, numbers.length, received, total));
       }
-      onProgress(number, 114, null, null);
+      onProgress(index + 1, numbers.length, null, null);
     }
   }
 
@@ -473,6 +575,7 @@ class _HomePageState extends State<HomePage> {
     'بدر التركي',
     'عبدالرحمن السديس',
     'مشاري العفاسي',
+    'علي جابر',
   ];
 
   @override
@@ -1540,6 +1643,8 @@ class _RecitersPageState extends State<RecitersPage> {
   int? receivedBytes;
   int? totalBytes;
   String? status;
+  String reciterQuery = '';
+  bool catalogOnline = false;
 
   @override void initState() {
     super.initState();
@@ -1559,7 +1664,7 @@ class _RecitersPageState extends State<RecitersPage> {
   }
 
   Future<void> _loadSettings() async {
-    await AudioLibrary.loadRequestedReciters();
+    catalogOnline = await AudioLibrary.loadRequestedReciters();
     final prefs = await SharedPreferences.getInstance();
     final matchingReaders = widget.initialReciterName == null
         ? <Map<String, String>>[]
@@ -1570,19 +1675,37 @@ class _RecitersPageState extends State<RecitersPage> {
           }).toList();
     final requestedEdition = matchingReaders.isEmpty ? null : matchingReaders.first['edition'];
     final savedRaw = requestedEdition ?? prefs.getString('selected_reciter') ?? edition;
-    final saved = reciters.any((item) => item['edition'] == savedRaw) ? savedRaw : reciters.first['edition']!;
+    final resolvedSaved = AudioLibrary.resolveEdition(savedRaw);
+    final saved = reciters.any((item) => item['edition'] == resolvedSaved)
+        ? resolvedSaved
+        : reciters.first['edition']!;
     if (saved != savedRaw) await prefs.setString('selected_reciter', saved);
-    final savedSurah = (prefs.getInt('selected_surah') ?? surah).clamp(1, 114).toInt();
+    final savedSurah = AudioLibrary.preferredSurahFor(
+      saved, (prefs.getInt('selected_surah') ?? surah).clamp(1, 114).toInt());
     if (mounted) setState(() {
       edition = saved;
       surah = savedSurah;
       playing = player.playing;
       loadedKey = SakinahAudioEngine.loadedKey;
       if (widget.initialReciterName != null && requestedEdition == null) {
-        status = 'تعذر جلب رابط ${widget.initialReciterName} حالياً. تحقق من الإنترنت ثم أعد فتح قائمة القراء.';
+        status = 'لم يتم العثور على القارئ ${widget.initialReciterName} في القائمة الحالية.';
+      } else if (!catalogOnline) {
+        status = 'تعمل القائمة الاحتياطية حالياً. اتصل بالإنترنت ثم اضغط تحديث القراء لجلب القائمة الكاملة.';
       }
     });
     await _refreshDownloaded();
+  }
+
+  Future<void> _refreshCatalog() async {
+    if (mounted) setState(() => status = 'جارٍ تحديث قائمة القراء من المصدر...');
+    final success = await AudioLibrary.loadRequestedReciters(force: true);
+    if (!mounted) return;
+    setState(() {
+      catalogOnline = success;
+      status = success
+          ? 'تم تحديث القائمة: ${reciters.length} قارئ متاح.'
+          : 'تعذر تحديث القائمة. تحقق من الإنترنت؛ القراء المحفوظون في التطبيق ما زالوا متاحين.';
+    });
   }
 
   Future<void> _refreshDownloaded() async {
@@ -1596,15 +1719,26 @@ class _RecitersPageState extends State<RecitersPage> {
     SakinahAudioEngine.loadedKey = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('selected_reciter', value);
-    if (mounted) setState(() { edition = value; loadedKey = null; playing = false; status = null; });
+    final nextSurah = AudioLibrary.preferredSurahFor(value, surah);
+    await prefs.setInt('selected_surah', nextSurah);
+    if (mounted) setState(() {
+      edition = value;
+      surah = nextSurah;
+      loadedKey = null;
+      playing = false;
+      status = null;
+    });
     await _refreshDownloaded();
   }
 
   Future<void> _playNextSurah() async {
-    if (_advancingAfterCompletion || surah >= 114) return;
+    if (_advancingAfterCompletion) return;
+    final available = AudioLibrary.surahNumbersFor(edition);
+    final nextChoices = available.where((number) => number > surah).toList();
+    if (nextChoices.isEmpty) return;
     _advancingAfterCompletion = true;
     try {
-      final nextSurah = surah + 1;
+      final nextSurah = nextChoices.first;
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('selected_surah', nextSurah);
       if (!mounted) return;
@@ -1621,6 +1755,11 @@ class _RecitersPageState extends State<RecitersPage> {
   }
 
   Future<void> _play() async {
+    final allowed = AudioLibrary.availableSurahs(edition);
+    if (allowed != null && !allowed.contains(surah)) {
+      if (mounted) setState(() => status = 'هذه السورة غير موجودة في مصحف القارئ المختار. اختر سورة أخرى من القائمة.');
+      return;
+    }
     final key = '$edition:$surah';
     try {
       if (playing) {
@@ -1667,7 +1806,7 @@ class _RecitersPageState extends State<RecitersPage> {
         if (mounted) setState(() { done = number; receivedBytes = received; totalBytes = length; });
       });
       await _refreshDownloaded();
-      if (mounted) setState(() => status = 'اكتمل حفظ المصحف الصوتي لهذا القارئ (114 سورة)');
+      if (mounted) setState(() => status = 'اكتمل حفظ ${AudioLibrary.surahNumbersFor(edition).length} سورة متاحة لهذا القارئ');
     } catch (e) {
       await _refreshDownloaded();
       if (mounted) setState(() => status = '${e.toString().replaceFirst('Exception: ', '')}\nيمكن إعادة المحاولة لاستكمال التنزيل.');
@@ -1688,25 +1827,44 @@ class _RecitersPageState extends State<RecitersPage> {
 
   @override Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('التلاوات الصوتية'), actions: [
+      IconButton(tooltip: 'تحديث قائمة القراء', onPressed: _refreshCatalog, icon: const Icon(Icons.sync_rounded)),
       IconButton(tooltip: 'إدارة التنزيلات', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AudioDownloadsPage())), icon: const Icon(Icons.folder_rounded)),
     ]),
     body: ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 28), children: [
       Container(padding: const EdgeInsets.all(19), decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF073A29), Color(0xFF0D6942)]), borderRadius: BorderRadius.circular(23)), child: Row(children: [
         Container(width: 54, height: 54, decoration: BoxDecoration(color: Colors.white.withValues(alpha: .13), borderRadius: BorderRadius.circular(17)), child: const Icon(Icons.headphones_rounded, color: gold, size: 30)),
-        const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('أنصت بقلبك', style: TextStyle(color: Colors.white, fontSize: 21, fontWeight: FontWeight.w900)), Text('$downloaded من 114 سورة محفوظة لهذا القارئ', style: const TextStyle(color: Colors.white70, fontSize: 12))])),
+        const SizedBox(width: 13), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('أنصت بقلبك', style: TextStyle(color: Colors.white, fontSize: 21, fontWeight: FontWeight.w900)), Text('$downloaded من ${AudioLibrary.surahNumbersFor(edition).length} سورة متاحة لهذا القارئ', style: const TextStyle(color: Colors.white70, fontSize: 12))])),
       ])),
       const SectionTitle('اختر القارئ'),
-      for (final reciter in reciters) _ReciterChoice(
+      TextField(
+        textDirection: TextDirection.rtl,
+        decoration: InputDecoration(
+          hintText: 'ابحث عن اسم القارئ',
+          prefixIcon: const Icon(Icons.search_rounded),
+          suffixIcon: reciterQuery.isEmpty ? null : IconButton(
+            tooltip: 'مسح البحث',
+            onPressed: () => setState(() => reciterQuery = ''),
+            icon: const Icon(Icons.close_rounded),
+          ),
+          filled: true,
+          fillColor: const Color(0xFF101512),
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none),
+        ),
+        onChanged: (value) => setState(() => reciterQuery = value),
+      ),
+      const SizedBox(height: 8),
+      Text('${reciters.where((item) => normalizeArabic(item['name'] ?? '').contains(normalizeArabic(reciterQuery))).length} قارئ متاح', style: const TextStyle(color: Colors.white60, fontSize: 12)),
+      for (final reciter in reciters.where((item) => normalizeArabic(item['name'] ?? '').contains(normalizeArabic(reciterQuery)))) _ReciterChoice(
         name: reciter['name']!, edition: reciter['edition']!, selected: edition == reciter['edition'],
         onTap: () => _selectEdition(reciter['edition']!),
       ),
       const SectionTitle('اختر السورة'),
-      DropdownButtonFormField<int>(value: surah, decoration: const InputDecoration(prefixIcon: Icon(Icons.menu_book_rounded), border: OutlineInputBorder()),
-        items: [for (final item in surahs) DropdownMenuItem(value: item.number, child: Text('${item.number}. ${item.name}'))],
+      DropdownButtonFormField<int>(value: AudioLibrary.preferredSurahFor(edition, surah), decoration: const InputDecoration(prefixIcon: Icon(Icons.menu_book_rounded), border: OutlineInputBorder()),
+        items: [for (final number in AudioLibrary.surahNumbersFor(edition)) DropdownMenuItem(value: number, child: Text('${number}. ${surahs[number - 1].name}'))],
         onChanged: downloading ? null : (value) async { await player.stop(); loadedKey = null; SakinahAudioEngine.loadedKey = null; final selected = value ?? 1; final prefs = await SharedPreferences.getInstance(); await prefs.setInt('selected_surah', selected); if (mounted) setState(() { surah = selected; status = null; }); }),
       const SizedBox(height: 14),
       Container(padding: const EdgeInsets.all(16), decoration: BoxDecoration(color: const Color(0xFF101512), borderRadius: BorderRadius.circular(22), border: Border.all(color: const Color(0xFF293A30))), child: Column(children: [
-        Row(children: [const Icon(Icons.graphic_eq_rounded, color: forest), const SizedBox(width: 8), Expanded(child: Text('سورة ${surahs[surah - 1].name}', style: const TextStyle(fontWeight: FontWeight.w900, color: deepGreen, fontSize: 17))), if (downloaded >= 114) const Icon(Icons.offline_pin_rounded, color: forest)]),
+        Row(children: [const Icon(Icons.graphic_eq_rounded, color: forest), const SizedBox(width: 8), Expanded(child: Text('سورة ${surahs[surah - 1].name}', style: const TextStyle(fontWeight: FontWeight.w900, color: deepGreen, fontSize: 17))), if (downloaded >= AudioLibrary.surahNumbersFor(edition).length) const Icon(Icons.offline_pin_rounded, color: forest)]),
         const SizedBox(height: 8),
         StreamBuilder<Duration>(stream: player.positionStream, initialData: Duration.zero, builder: (context, positionSnapshot) {
           final position = positionSnapshot.data ?? Duration.zero;
@@ -1733,8 +1891,8 @@ class _RecitersPageState extends State<RecitersPage> {
       ])),
       const SizedBox(height: 12),
       OutlinedButton.icon(onPressed: downloading ? null : _downloadCurrent, icon: const Icon(Icons.download_rounded), label: Text('تنزيل السورة المختارة (${_bytes(receivedBytes)}/${_bytes(totalBytes)})')),
-      FilledButton.icon(onPressed: downloading ? null : _downloadAll, icon: const Icon(Icons.download_for_offline_rounded), label: Text(downloading ? 'تنزيل ${done.clamp(0, 114)} / 114' : 'تنزيل المصحف الصوتي كاملاً')),
-      if (downloading) Padding(padding: const EdgeInsets.only(top: 9), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [LinearProgressIndicator(value: totalBytes != null && totalBytes! > 0 && receivedBytes != null ? receivedBytes! / totalBytes! : (done / 114), minHeight: 6, borderRadius: BorderRadius.circular(99), color: gold, backgroundColor: mint), if (receivedBytes != null) Padding(padding: const EdgeInsets.only(top: 5), child: Text('حجم الملف الحالي: ${_bytes(receivedBytes)} / ${_bytes(totalBytes)}', textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, color: Colors.white70)))])),
+      FilledButton.icon(onPressed: downloading ? null : _downloadAll, icon: const Icon(Icons.download_for_offline_rounded), label: Text(downloading ? 'تنزيل ${done.clamp(0, AudioLibrary.surahNumbersFor(edition).length)} / ${AudioLibrary.surahNumbersFor(edition).length}' : AudioLibrary.surahNumbersFor(edition).length < 114 ? 'تنزيل جميع السور المتاحة' : 'تنزيل المصحف الصوتي كاملاً')),
+      if (downloading) Padding(padding: const EdgeInsets.only(top: 9), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [LinearProgressIndicator(value: totalBytes != null && totalBytes! > 0 && receivedBytes != null ? receivedBytes! / totalBytes! : (done / AudioLibrary.surahNumbersFor(edition).length), minHeight: 6, borderRadius: BorderRadius.circular(99), color: gold, backgroundColor: mint), if (receivedBytes != null) Padding(padding: const EdgeInsets.only(top: 5), child: Text('حجم الملف الحالي: ${_bytes(receivedBytes)} / ${_bytes(totalBytes)}', textAlign: TextAlign.center, style: const TextStyle(fontSize: 11, color: Colors.white70)))])),
       if (status != null) Container(margin: const EdgeInsets.only(top: 12), padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: goldSoft, borderRadius: BorderRadius.circular(15)), child: Text(status!, style: const TextStyle(color: deepGreen, height: 1.5))),
       const SizedBox(height: 12),
       const Text('يُحفظ كل ملف داخل مساحة التطبيق الخاصة. عند انقطاع التنزيل، يمكن إعادة المحاولة لاستكمال الملف الجزئي متى دعم الخادم طلب الاستكمال.', style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.7)),
