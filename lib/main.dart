@@ -402,7 +402,6 @@ class SakinahApp extends StatelessWidget {
           TargetPlatform.android: FadeForwardsPageTransitionsBuilder(),
           TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
         }),
-        fontFamily: 'sans-serif',
       ),
       builder: (context, child) => Directionality(textDirection: TextDirection.rtl, child: child ?? const SizedBox.shrink()),
       home: const MainShell(),
