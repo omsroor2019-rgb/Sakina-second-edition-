@@ -370,17 +370,16 @@ const duas = <DuaItem>[
   DuaItem('دعاء العفو عند النسيان والخطأ', 'رَبَّنَا لَا تُؤَاخِذْنَا إِنْ نَسِينَا أَوْ أَخْطَأْنَا', 'سورة البقرة، الآية 286', category: 'أدعية من القرآن', topic: 'الهم والكرب'),
 ];
 
-// Reciter editions verified against the current AlQuran Cloud by-surah CDN index.
-// The available surah files for these editions are served at 128 kbps.
-const reciters = <Map<String, String>>[
-  {'name': 'مشاري العفاسي', 'edition': 'ar.alafasy', 'bitrate': '128'},
-  {'name': 'عبد الباسط عبد الصمد (مرتل)', 'edition': 'ar.abdulbasitmurattal', 'bitrate': '128'},
-  {'name': 'سعود الشريم', 'edition': 'ar.saudalshuraim', 'bitrate': '128'},
-  {'name': 'عبد الله بصفر', 'edition': 'ar.abdullahbasfar', 'bitrate': '128'},
-  {'name': 'ناصر القطامي', 'edition': 'ar.nasseralqatami', 'bitrate': '128'},
-  {'name': 'بندر بليلة', 'edition': 'ar.bandarbalila', 'bitrate': '128'},
-  {'name': 'إبراهيم الأخضر', 'edition': 'ar.ibrahimalakhdar', 'bitrate': '128'},
-  {'name': 'محمود علي البنا', 'edition': 'ar.mahmoudalialbanna', 'bitrate': '128'},
-  {'name': 'عبد الله المطرود', 'edition': 'ar.abdullahalmatrood', 'bitrate': '128'},
-  {'name': 'عبد العزيز الزهراني', 'edition': 'ar.abdulazizazzahrani', 'bitrate': '128'},
+// The AlQuran Cloud IDs and default bitrates below follow its published CDN catalogue.
+// Requested additional reciters are loaded from MP3Quran's public reciters API at runtime.
+final reciters = <Map<String, String>>[
+  {'name': 'مشاري العفاسي', 'edition': 'ar.alafasy', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'سعود الشريم', 'edition': 'ar.shuraim', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'عبدالرحمن السديس', 'edition': 'ar.sudais', 'bitrate': '192', 'source': 'alquran'},
+  {'name': 'محمود خليل الحصري', 'edition': 'ar.husary', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'محمد صديق المنشاوي', 'edition': 'ar.minshawi', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'أحمد العجمي', 'edition': 'ar.ajamy', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'محمد أيوب', 'edition': 'ar.muhammadayoub', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'علي الحذيفي', 'edition': 'ar.hudhaify', 'bitrate': '128', 'source': 'alquran'},
+  {'name': 'محمد جبريل', 'edition': 'ar.muhammadjibreel', 'bitrate': '128', 'source': 'alquran'},
 ];
