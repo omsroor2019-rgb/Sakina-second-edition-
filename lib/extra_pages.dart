@@ -12,10 +12,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'data.dart';
 
-const Color sakinahGreen = Color(0xFF176B50);
-const Color sakinahDeep = Color(0xFF104A3A);
-const Color sakinahMint = Color(0xFFE8F1E9);
-const Color sakinahInk = Color(0xFF1D3028);
+const Color sakinahGreen = Color(0xFF15935A);
+const Color sakinahDeep = Color(0xFF55C58A);
+const Color sakinahMint = Color(0xFF14251C);
+const Color sakinahInk = Color(0xFFF0F5F1);
 
 String normalizeArabic(String input) {
   return input
@@ -134,7 +134,7 @@ class _DailyWorshipPageState extends State<DailyWorshipPage> {
                   for (final item in _habits) _CheckTile(title: item.$2, checked: _values[item.$1] ?? false, onChanged: (v) => _toggle(item.$1, v)),
                   const Padding(
                     padding: EdgeInsets.only(top: 12),
-                    child: Text('هذه الصفحة للتذكير والتنظيم الشخصي فقط. لا تُصدر أحكاماً على صحة العبادة أو قبولها.', style: TextStyle(color: Colors.black54, height: 1.6, fontSize: 12)),
+                    child: Text('هذه الصفحة للتذكير والتنظيم الشخصي فقط. لا تُصدر أحكاماً على صحة العبادة أو قبولها.', style: TextStyle(color: Colors.white70, height: 1.6, fontSize: 12)),
                   ),
                 ],
               ),
@@ -259,7 +259,7 @@ class _KhatmahPlannerPageState extends State<KhatmahPlannerPage> {
               TextButton(onPressed: _choosePlan, child: const Text('تغيير مدة الخطة')),
             ]),
             const SizedBox(height: 4),
-            const Text('المصحف المدني الشائع يتكون من 604 صفحات تقريباً؛ قد يختلف ترقيم الصفحات باختلاف طبعة المصحف.', style: TextStyle(color: Colors.black54, fontSize: 11, height: 1.5)),
+            const Text('المصحف المدني الشائع يتكون من 604 صفحات تقريباً؛ قد يختلف ترقيم الصفحات باختلاف طبعة المصحف.', style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.5)),
           ]))),
           if (_page >= 604) const Card(child: ListTile(leading: Icon(Icons.celebration, color: sakinahGreen), title: Text('ما شاء الله! أكملت صفحات الخطة.'), subtitle: Text('يمكنك بدء ختمة جديدة متى أحببت.'))),
           OutlinedButton.icon(onPressed: () async { final confirm = await showDialog<bool>(context: context, builder: (c) => AlertDialog(title: const Text('إعادة بدء الخطة؟'), content: const Text('سيتم تصفير تقدم هذه الختمة وبدء خطة جديدة.'), actions: [TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('إلغاء')), FilledButton(onPressed: () => Navigator.pop(c, true), child: const Text('إعادة البدء'))])); if (confirm == true) await _start(_days); }, icon: const Icon(Icons.restart_alt), label: const Text('بدء الخطة من جديد')),
@@ -342,10 +342,10 @@ class _QuranSearchPageState extends State<QuranSearchPage> {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('البحث في القرآن')),
     body: Column(children: [
-      Padding(padding: const EdgeInsets.all(16), child: TextField(controller: _controller, onChanged: _search, textDirection: TextDirection.rtl, decoration: InputDecoration(prefixIcon: const Icon(Icons.search), hintText: 'اكتب كلمة أو جزءاً من آية', filled: true, fillColor: Colors.white, border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none)))),
+      Padding(padding: const EdgeInsets.all(16), child: TextField(controller: _controller, onChanged: _search, textDirection: TextDirection.rtl, decoration: InputDecoration(prefixIcon: const Icon(Icons.search), hintText: 'اكتب كلمة أو جزءاً من آية', filled: true, fillColor: const Color(0xFF101512), border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: BorderSide.none)))),
       if (_loading) const Expanded(child: Center(child: CircularProgressIndicator(color: sakinahGreen)))
       else if (_error != null) Expanded(child: Center(child: Padding(padding: const EdgeInsets.all(24), child: Text('$_error\nاتصل بالإنترنت أول مرة لتحميل نص المصحف.', textAlign: TextAlign.center))))
-      else Expanded(child: _results.isEmpty ? Center(child: Text(_controller.text.length < 2 ? 'ابدأ بكتابة كلمتين على الأقل' : 'لا توجد نتائج مطابقة', style: const TextStyle(color: Colors.black54))) : ListView.builder(padding: const EdgeInsets.symmetric(horizontal: 16), itemCount: _results.length, itemBuilder: (context, i) {
+      else Expanded(child: _results.isEmpty ? Center(child: Text(_controller.text.length < 2 ? 'ابدأ بكتابة كلمتين على الأقل' : 'لا توجد نتائج مطابقة', style: const TextStyle(color: Colors.white70))) : ListView.builder(padding: const EdgeInsets.symmetric(horizontal: 16), itemCount: _results.length, itemBuilder: (context, i) {
         final a = _results[i];
         return Card(child: ListTile(onTap: () => widget.onOpenSurah?.call(a['surah'] as int), title: Text(a['text'] as String, textAlign: TextAlign.right, style: const TextStyle(fontSize: 19, height: 1.8, color: sakinahInk)), subtitle: Text('سورة ${surahs[(a['surah'] as int) - 1].name} · الآية ${a['ayah']}'), trailing: const Icon(Icons.menu_book, color: sakinahGreen))); 
       })),
@@ -395,7 +395,7 @@ class _BookmarksPageState extends State<BookmarksPage> {
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(title: const Text('علاماتي المحفوظة')),
     body: _items.isEmpty
-        ? const Center(child: Text('لم تحفظ آيات بعد', style: TextStyle(color: Colors.black54)))
+        ? const Center(child: Text('لم تحفظ آيات بعد', style: TextStyle(color: Colors.white70)))
         : ListView(
             padding: const EdgeInsets.all(16),
             children: [
@@ -503,7 +503,7 @@ class _AyahCardPageState extends State<AyahCardPage> {
       Container(padding: const EdgeInsets.all(22), decoration: BoxDecoration(gradient: const LinearGradient(colors: [sakinahDeep, sakinahGreen]), borderRadius: BorderRadius.circular(25)), child: Column(children: [const Text('سَكينة', style: TextStyle(color: Color(0xFFFFF4D2), fontSize: 27, fontWeight: FontWeight.w900)), const SizedBox(height: 22), Text(widget.ayahText, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 23, height: 2)), const SizedBox(height: 20), Text(widget.reference, style: const TextStyle(color: Color(0xFFFFF4D2), fontWeight: FontWeight.bold)), const SizedBox(height: 10), const Text('تلاوة وتدبّر', style: TextStyle(color: Colors.white70))])),
       const SizedBox(height: 16),
       FilledButton.icon(onPressed: _busy ? null : _shareImage, icon: const Icon(Icons.image_outlined), label: Text(_busy ? 'جارٍ تجهيز البطاقة...' : 'إنشاء الصورة ومشاركتها')),
-      const Padding(padding: EdgeInsets.only(top: 12), child: Text('تُنشأ البطاقة من نص الآية الذي وصل من مصدر المصحف، مع إبقاء مرجع السورة والآية ظاهراً.', style: TextStyle(color: Colors.black54, height: 1.6, fontSize: 12))),
+      const Padding(padding: EdgeInsets.only(top: 12), child: Text('تُنشأ البطاقة من نص الآية الذي وصل من مصدر المصحف، مع إبقاء مرجع السورة والآية ظاهراً.', style: TextStyle(color: Colors.white70, height: 1.6, fontSize: 12))),
     ]),
   );
 }
@@ -515,7 +515,7 @@ class _ProgressCard extends StatelessWidget {
   final String trailing;
   const _ProgressCard({required this.title, required this.subtitle, required this.value, required this.trailing});
   @override
-  Widget build(BuildContext context) => Card(child: Padding(padding: const EdgeInsets.all(17), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: sakinahDeep)), const SizedBox(height: 4), Text(subtitle, style: const TextStyle(color: Colors.black54, fontSize: 12)), const SizedBox(height: 13), ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: value.clamp(0, 1).toDouble(), minHeight: 9, color: sakinahGreen, backgroundColor: sakinahMint)), const SizedBox(height: 7), Align(alignment: Alignment.centerLeft, child: Text(trailing, style: const TextStyle(fontWeight: FontWeight.bold, color: sakinahGreen)))])));
+  Widget build(BuildContext context) => Card(child: Padding(padding: const EdgeInsets.all(17), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(title, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900, color: sakinahDeep)), const SizedBox(height: 4), Text(subtitle, style: const TextStyle(color: Colors.white70, fontSize: 12)), const SizedBox(height: 13), ClipRRect(borderRadius: BorderRadius.circular(20), child: LinearProgressIndicator(value: value.clamp(0, 1).toDouble(), minHeight: 9, color: sakinahGreen, backgroundColor: sakinahMint)), const SizedBox(height: 7), Align(alignment: Alignment.centerLeft, child: Text(trailing, style: const TextStyle(fontWeight: FontWeight.bold, color: sakinahGreen)))])));
 }
 
 class _ExtraSectionTitle extends StatelessWidget {
