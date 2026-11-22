@@ -92,7 +92,7 @@ class QuranStore {
 
 class AudioLibrary {
   static final Map<String, String> _externalServers = {
-    'mp3quran_ali_jaber': 'https://cdn.mp3quran.net/download/audio/ali-jaber/r1/',
+    'mp3quran_ali_jaber': 'https://cdn.mp3quran.net/audio/ali-jaber/r1/',
   };
   static final Map<String, Set<int>> _externalSurahs = {
     'mp3quran_ali_jaber': Set<int>.from(List<int>.generate(114, (index) => index + 1)),
@@ -100,6 +100,77 @@ class AudioLibrary {
   static final Map<String, String> _editionReplacements = {};
   static bool _requestedCatalogLoaded = false;
   static bool _catalogLoadInProgress = false;
+  static const String _catalogCacheKey = 'sakinah_mp3quran_catalog_v1';
+
+  /// Restore the latest successful MP3Quran index if the device is offline.
+  /// This keeps dynamic reciters and their exact servers available across restarts.
+  static Future<bool> _restoreCachedCatalog() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_catalogCacheKey);
+      if (raw == null || raw.isEmpty) return false;
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map || decoded['reciters'] is! List ||
+          decoded['servers'] is! Map || decoded['surahs'] is! Map) {
+        return false;
+      }
+
+      final additions = <Map<String, String>>[];
+      for (final item in decoded['reciters'] as List) {
+        if (item is! Map) continue;
+        final entry = <String, String>{};
+        item.forEach((key, value) {
+          if (key != null && value != null) entry[key.toString()] = value.toString();
+        });
+        if ((entry['name'] ?? '').isNotEmpty && (entry['edition'] ?? '').isNotEmpty) {
+          additions.add(entry);
+        }
+      }
+      if (additions.isEmpty) return false;
+
+      final servers = <String, String>{};
+      (decoded['servers'] as Map).forEach((key, value) {
+        if (key != null && value is String && value.startsWith('https://')) {
+          servers[key.toString()] = value;
+        }
+      });
+      final availableSurahs = <String, Set<int>>{};
+      (decoded['surahs'] as Map).forEach((key, value) {
+        if (key == null || value is! List) return;
+        final parsed = value.map((number) => int.tryParse(number.toString()))
+            .whereType<int>().where((number) => number >= 1 && number <= 114).toSet();
+        if (parsed.isNotEmpty) availableSurahs[key.toString()] = parsed;
+      });
+
+      final baseName = (String name) => normalizeArabic(name.split(' · ').first);
+      final apiNames = additions.map((item) => baseName(item['name'] ?? '')).toSet();
+      final replacements = <String, String>{};
+      for (final oldReader in reciters.where((item) =>
+          item['source'] != 'mp3quran' && apiNames.contains(normalizeArabic(item['name'] ?? '')))) {
+        final oldEdition = oldReader['edition'];
+        final newReader = additions.firstWhere((item) =>
+            baseName(item['name'] ?? '') == normalizeArabic(oldReader['name'] ?? ''),
+            orElse: () => <String, String>{});
+        if (oldEdition != null && newReader['edition'] != null) {
+          replacements[oldEdition] = newReader['edition']!;
+        }
+      }
+      reciters.removeWhere((item) => item['source'] == 'mp3quran' ||
+          apiNames.contains(normalizeArabic(item['name'] ?? '')));
+      _externalServers.addAll(servers);
+      _externalSurahs.addAll(availableSurahs);
+      _editionReplacements
+        ..clear()
+        ..addAll(replacements);
+      reciters.addAll(additions);
+      reciters.sort((a, b) => normalizeArabic(a['name'] ?? '')
+          .compareTo(normalizeArabic(b['name'] ?? '')));
+      _requestedCatalogLoaded = true;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// Loads the complete Arabic MP3Quran catalogue, not a hard-coded shortlist.
   /// One best moshaf is selected for each reciter (full 114-surah editions first).
@@ -207,24 +278,31 @@ class AudioLibrary {
       // keeping other static editions as an offline/catalog fallback.
       reciters.removeWhere((item) => item['source'] == 'mp3quran' ||
           apiNames.contains(normalizeArabic(item['name'] ?? '')));
-      _externalServers
-        ..clear()
-        ..addAll(newServers);
-      _externalSurahs
-        ..clear()
-        ..addAll(newSurahs);
+      // Keep built-in fallback entries (notably Ali Jaber) if a catalogue
+      // refresh temporarily omits a record; replace only matching new editions.
+      _externalServers.addAll(newServers);
+      _externalSurahs.addAll(newSurahs);
       _editionReplacements
         ..clear()
         ..addAll(newEditionReplacements);
       reciters.addAll(additions);
       reciters.sort((a, b) => normalizeArabic(a['name'] ?? '')
           .compareTo(normalizeArabic(b['name'] ?? '')));
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_catalogCacheKey, jsonEncode({
+          'reciters': additions,
+          'servers': newServers,
+          'surahs': newSurahs.map((key, value) => MapEntry(key, value.toList()..sort())),
+        }));
+      } catch (_) {
+        // A cache write failure must not block online playback.
+      }
       _requestedCatalogLoaded = true;
       return true;
     } catch (_) {
-      // Static AlQuran Cloud readers remain available if the API/network is down.
-      // Keep the flag false so opening the recitation page can retry later.
-      return false;
+      // Use the last successful catalogue offline, while keeping static fallbacks.
+      return await _restoreCachedCatalog();
     } finally {
       _catalogLoadInProgress = false;
     }
@@ -697,20 +775,36 @@ class _HomePageState extends State<HomePage> {
 class _SakinahLogoMark extends StatelessWidget {
   final double size;
   const _SakinahLogoMark({this.size = 54});
+
   @override
   Widget build(BuildContext context) => Container(
     width: size,
     height: size,
     decoration: BoxDecoration(
-      gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF0B4D34), Color(0xFF092218)]),
       borderRadius: BorderRadius.circular(size * .31),
-      border: Border.all(color: gold.withValues(alpha: .58), width: 1.1),
-      boxShadow: [BoxShadow(color: forest.withValues(alpha: .22), blurRadius: 18, offset: const Offset(0, 6))],
+      boxShadow: [
+        BoxShadow(
+          color: forest.withValues(alpha: .24),
+          blurRadius: 16,
+          offset: const Offset(0, 5),
+        ),
+      ],
     ),
-    child: Stack(alignment: Alignment.center, children: [
-      Icon(Icons.nightlight_round, color: gold, size: size * .49),
-      Positioned(top: size * .17, right: size * .19, child: Icon(Icons.auto_awesome, size: size * .13, color: const Color(0xFFFFE8A8))),
-    ]),
+    child: ClipRRect(
+      borderRadius: BorderRadius.circular(size * .31),
+      child: Image.asset(
+        'assets/images/sakinah_app_logo.png',
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        filterQuality: FilterQuality.high,
+        errorBuilder: (_, __, ___) => Container(
+          color: const Color(0xFF06452F),
+          alignment: Alignment.center,
+          child: Icon(Icons.mosque_rounded, color: gold, size: size * .55),
+        ),
+      ),
+    ),
   );
 }
 
