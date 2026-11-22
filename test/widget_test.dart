@@ -18,18 +18,53 @@ void main() {
     expect(normalizeArabic('رحمة'), isNot(normalizeArabic('رحمه')));
   });
 
-  test('Verified static reciters have unique editions and edition-specific bitrates', () {
-    expect(reciters.length, greaterThanOrEqualTo(9));
+  test('Ali Jaber audio uses the verified MP3Quran full-surah directory', () {
+    expect(
+      app.AudioLibrary.surahAudioUrl(1, 'mp3quran_ali_jaber'),
+      'https://cdn.mp3quran.net/audio/ali-jaber/r1/001.mp3',
+    );
+    expect(
+      app.AudioLibrary.surahAudioUrl(114, 'mp3quran_ali_jaber'),
+      'https://cdn.mp3quran.net/audio/ali-jaber/r1/114.mp3',
+    );
+  });
+
+  test('AlQuran Cloud fallback readers use the documented surah audio route', () {
+    expect(
+      app.AudioLibrary.surahAudioUrl(1, 'ar.alafasy'),
+      'https://cdn.islamic.network/quran/audio-surah/128/ar.alafasy/1.mp3',
+    );
+    expect(
+      app.AudioLibrary.surahAudioUrl(1, 'ar.sudais'),
+      'https://cdn.islamic.network/quran/audio-surah/192/ar.sudais/1.mp3',
+    );
+  });
+
+  test('Static reciters have unique editions, valid sources and correct bitrates', () {
+    // The built-in fallback catalogue contains nine AlQuran Cloud readers
+    // plus Ali Jaber, whose verified full-surah recordings come from MP3Quran.
+    expect(reciters, hasLength(10));
     expect(reciters.map((r) => r['edition']).toSet(), hasLength(reciters.length));
-    expect(reciters.map((r) => r['name']).toSet(), containsAll([
-      'مشاري العفاسي', 'سعود الشريم', 'عبدالرحمن السديس',
-    ]));
+
+    expect(
+      reciters.singleWhere((r) => r['name'] == 'علي جابر'),
+      containsPair('edition', 'mp3quran_ali_jaber'),
+    );
+    final aliJaber = reciters.singleWhere((r) => r['name'] == 'علي جابر');
+    expect(aliJaber['source'], 'mp3quran_fallback');
+    expect(aliJaber['bitrate'], 'API');
+
+    final alQuranReaders = reciters.where((r) => r['source'] == 'alquran').toList();
+    expect(alQuranReaders, hasLength(9));
+    expect(alQuranReaders.every((r) => r['bitrate'] != 'API'), isTrue);
+    expect(
+      reciters.map((r) => r['name']).toSet(),
+      containsAll(['مشاري العفاسي', 'سعود الشريم', 'عبدالرحمن السديس']),
+    );
     expect(reciters.firstWhere((r) => r['edition'] == 'ar.alafasy')['bitrate'], '128');
     expect(reciters.firstWhere((r) => r['edition'] == 'ar.shuraim')['bitrate'], '128');
     expect(reciters.firstWhere((r) => r['edition'] == 'ar.sudais')['bitrate'], '192');
-    expect(reciters.every((r) => r['source'] == 'alquran'), isTrue);
   });
-
 
   test('Manual prayer times match the approved Al Mukalla schedule', () {
     final date = DateTime(2026, 11, 22);
