@@ -1,9 +1,12 @@
 name: Build Sakinah Android APK
 
-on:
-  # Run manually after all source files have been uploaded. This avoids
-  # starting and cancelling a build for every single file commit.
+
+"on":
+  push:
+    branches:
+      - main
   workflow_dispatch:
+
 
 permissions:
   contents: read
