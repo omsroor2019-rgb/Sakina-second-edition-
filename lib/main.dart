@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'data.dart';
 import 'extra_pages.dart';
@@ -90,6 +91,59 @@ class QuranStore {
 }
 
 class AudioLibrary {
+  static final Map<String, String> _externalServers = {};
+  static final Map<String, Set<int>> _externalSurahs = {};
+  static bool _requestedCatalogLoaded = false;
+
+  static Future<void> loadRequestedReciters() async {
+    if (_requestedCatalogLoaded) return;
+    try {
+      final response = await http.get(Uri.parse('https://mp3quran.net/api/v3/reciters?language=ar')).timeout(const Duration(seconds: 20));
+      if (response.statusCode != 200) throw HttpException('MP3Quran HTTP ${response.statusCode}');
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
+      final rows = (decoded['reciters'] as List<dynamic>? ?? []);
+      const requested = <String>['خالد الجليل', 'ماهر المعيقلي', 'بدر التركي'];
+      reciters.removeWhere((item) => item['source'] == 'mp3quran');
+      for (final target in requested) {
+        Map<String, dynamic>? reader;
+        final normalizedTarget = normalizeArabic(target);
+        for (final raw in rows) {
+          if (raw is! Map<String, dynamic>) continue;
+          final normalizedName = normalizeArabic(raw['name']?.toString() ?? '');
+          if (normalizedName == normalizedTarget ||
+              normalizedName.contains(normalizedTarget) ||
+              normalizedTarget.contains(normalizedName)) {
+            reader = raw;
+            if (normalizedName == normalizedTarget) break;
+          }
+        }
+        if (reader == null) continue;
+        final moshafs = (reader['moshaf'] as List<dynamic>? ?? []).whereType<Map<String, dynamic>>().toList();
+        Map<String, dynamic>? selected;
+        for (final moshaf in moshafs) {
+          final count = int.tryParse(moshaf['surah_total']?.toString() ?? '') ?? 0;
+          final title = moshaf['name']?.toString() ?? '';
+          if (count >= 114 && (title.contains('حفص') || selected == null)) { selected = moshaf; if (title.contains('حفص')) break; }
+        }
+        if (selected == null) continue;
+        final server = selected['server']?.toString();
+        if (server == null || !server.startsWith('https://')) continue;
+        final moshafId = selected['id']?.toString();
+        if (moshafId == null || moshafId.isEmpty) continue;
+        final edition = 'mp3quran_$moshafId';
+        _externalServers[edition] = server.endsWith('/') ? server : '$server/';
+        final rawSurahs = selected['surah_list']?.toString() ?? '';
+        _externalSurahs[edition] = rawSurahs.split(',').map((v) => int.tryParse(v.trim())).whereType<int>().toSet();
+        reciters.add({'name': target, 'edition': edition, 'bitrate': 'API', 'source': 'mp3quran'});
+      }
+      _requestedCatalogLoaded = true;
+    } catch (_) {
+      // Keep the verified AlQuran Cloud readers available when the device is offline.
+    }
+  }
+
+  static Set<int>? availableSurahs(String edition) => _externalSurahs[edition];
+
   static Future<Directory> _dir() async {
     final root = await getApplicationSupportDirectory();
     final dir = Directory('${root.path}/audio');
@@ -108,8 +162,11 @@ class AudioLibrary {
   static String bitrateFor(String edition) =>
       reciters.firstWhere((item) => item['edition'] == edition, orElse: () => {'bitrate': '128'})['bitrate'] ?? '128';
 
-  static String surahAudioUrl(int surah, String edition) =>
-      'https://cdn.islamic.network/quran/audio-surah/${bitrateFor(edition)}/$edition/$surah.mp3';
+  static String surahAudioUrl(int surah, String edition) {
+    final externalServer = _externalServers[edition];
+    if (externalServer != null) return '$externalServer${surah.toString().padLeft(3, '0')}.mp3';
+    return 'https://cdn.islamic.network/quran/audio-surah/${bitrateFor(edition)}/$edition/$surah.mp3';
+  }
 
   /// Downloads into a .part file. If a previous download was interrupted,
   /// the next request asks the server to continue from the existing byte count.
@@ -179,6 +236,10 @@ class AudioLibrary {
 
   static Future<File> downloadSurah(String edition, int surah,
       {void Function(int, int?)? onProgress}) async {
+    final allowed = _externalSurahs[edition];
+    if (allowed != null && !allowed.contains(surah)) {
+      throw const FormatException('هذه السورة غير متاحة في الإصدار الصوتي المختار.');
+    }
     final marker = await reciterDir(edition);
     final destination = File('${marker.parent.path}/${surah.toString().padLeft(3, '0')}.mp3');
     if (await destination.exists() && await destination.length() > 1024) return destination;
@@ -189,6 +250,10 @@ class AudioLibrary {
     String edition, {
     required void Function(int, int, int?, int?) onProgress,
   }) async {
+    final allowed = _externalSurahs[edition];
+    if (allowed != null && allowed.length < 114) {
+      throw const FormatException('هذا الإصدار لا يحتوي على جميع سور القرآن؛ يمكن تنزيل السور المتاحة منفردة.');
+    }
     for (var number = 1; number <= 114; number++) {
       final marker = await reciterDir(edition);
       final destination = File('${marker.parent.path}/${number.toString().padLeft(3, '0')}.mp3');
@@ -236,8 +301,16 @@ class SakinahApp extends StatelessWidget {
     return MaterialApp(
       title: appName,
       debugShowCheckedModeBanner: false,
+      locale: const Locale('ar'),
+      supportedLocales: const [Locale('ar')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       theme: ThemeData(
         useMaterial3: true,
+        fontFamily: 'sans-serif',
         brightness: Brightness.dark,
         colorScheme: ColorScheme.fromSeed(
           seedColor: forest,
@@ -281,6 +354,7 @@ class SakinahApp extends StatelessWidget {
         textTheme: ThemeData.dark().textTheme.apply(
           bodyColor: ink,
           displayColor: Colors.white,
+          fontFamily: 'sans-serif',
         ),
         filledButtonTheme: FilledButtonThemeData(
           style: FilledButton.styleFrom(
@@ -351,14 +425,15 @@ class _MainShellState extends State<MainShell> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: SafeArea(child: IndexedStack(index: tab, children: pages)),
-      bottomNavigationBar: NavigationBar(
+      bottomNavigationBar: SafeArea(top: false, child: NavigationBar(
+        height: 72,
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() => tab = i),
         backgroundColor: const Color(0xFF0B100D),
         indicatorColor: const Color(0xFF174A31),
         elevation: 2,
-        destinations: [for (var i = 0; i < labels.length; i++) NavigationDestination(icon: Icon(icons[i]), selectedIcon: Icon(icons[i], color: forest), label: labels[i])],
-      ),
+        destinations: [for (var i = 0; i < labels.length; i++) NavigationDestination(icon: Icon(icons[i]), selectedIcon: Icon(icons[i], color: const Color(0xFF70D6A0)), label: labels[i])],
+      )),
     );
   }
 }
@@ -385,18 +460,32 @@ class SectionTitle extends StatelessWidget {
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
-  @override
-  State<HomePage> createState() => _HomePageState();
+  @override State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
   String location = 'المكلا';
   int tasbih = 0;
+
+  static const featuredReciters = <String>[
+    'خالد الجليل',
+    'سعود الشريم',
+    'ماهر المعيقلي',
+    'بدر التركي',
+    'عبدالرحمن السديس',
+    'مشاري العفاسي',
+  ];
+
   @override
-  void initState() { super.initState(); _load(); }
+  void initState() {
+    super.initState();
+    _load();
+  }
+
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    if (mounted) setState(() {
+    if (!mounted) return;
+    setState(() {
       location = prefs.getString('city') ?? 'المكلا';
       tasbih = prefs.getInt('tasbih') ?? 0;
     });
@@ -408,67 +497,209 @@ class _HomePageState extends State<HomePage> {
   Widget build(BuildContext context) {
     final today = DateTime.now();
     final hijri = toHijri(today);
-    return ListView(padding: const EdgeInsets.fromLTRB(18, 12, 18, 28), children: [
-      Row(children: [
-        Container(width: 48, height: 48, decoration: BoxDecoration(
-          gradient: const LinearGradient(colors: [Color(0xFF073A29), Color(0xFF0D6942)]), borderRadius: BorderRadius.circular(17)),
-          child: const Icon(Icons.nightlight_round, color: gold, size: 27)),
-        const SizedBox(width: 11),
-        const Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('سَكينة', style: TextStyle(fontSize: 27, fontWeight: FontWeight.w900, color: deepGreen)),
-          Text('طمأنينة لقلبك في كل يوم', style: TextStyle(color: Colors.white70, fontSize: 12)),
-        ])),
-        IconButton(tooltip: 'الإعدادات', onPressed: () => _open(const SettingsPage()), icon: const Icon(Icons.tune_rounded, color: forest)),
+    final bottomInset = MediaQuery.of(context).padding.bottom;
+
+    return ListView(
+      padding: EdgeInsets.fromLTRB(18, 13, 18, 28 + bottomInset),
+      children: [
+        Row(
+          children: [
+            _SakinahLogoMark(size: 54),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('سَكينة', style: TextStyle(fontSize: 28, fontWeight: FontWeight.w900, color: Color(0xFF69D49A), letterSpacing: .1)),
+                  SizedBox(height: 2),
+                  Text('طمأنينة لقلبك في كل يوم', style: TextStyle(color: Colors.white70, fontSize: 12, height: 1.5)),
+                ],
+              ),
+            ),
+            IconButton(
+              tooltip: 'الإعدادات',
+              onPressed: () => _open(const SettingsPage()),
+              icon: const Icon(Icons.tune_rounded, color: Colors.white, size: 25),
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        _MosqueHeroCard(
+          location: location,
+          date: today,
+          hijriText: '${hijri.day} ${hijriMonths[hijri.month]} ${hijri.year} هـ',
+          onRead: () => _open(const QuranStandalonePage()),
+          onListen: () => _open(const RecitersPage()),
+        ),
+        Padding(
+      padding: const EdgeInsets.fromLTRB(3, 18, 3, 10),
+      child: Row(children: [
+        const Expanded(child: Text('استمع إلى قرائك المفضلين', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: deepGreen))),
+        TextButton(onPressed: () => _open(const RecitersPage()), child: const Text('كل القراء')),
       ]),
-      const SizedBox(height: 18),
-      Container(padding: const EdgeInsets.all(21), decoration: BoxDecoration(
-        gradient: const LinearGradient(begin: Alignment.topRight, end: Alignment.bottomLeft, colors: [Color(0xFF073A29), Color(0xFF0D6942)]),
-        borderRadius: BorderRadius.circular(27), boxShadow: [BoxShadow(color: deepGreen.withValues(alpha: .18), blurRadius: 22, offset: const Offset(0, 10))]),
-        child: Stack(children: [
-          Positioned(left: -26, top: -30, child: Icon(Icons.auto_awesome, size: 125, color: gold.withValues(alpha: .10))),
-          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [const Icon(Icons.location_on_outlined, color: gold, size: 17), const SizedBox(width: 5), Text(location, style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.w600)), const Spacer(), Text('${today.day}/${today.month}/${today.year} م', style: const TextStyle(color: Colors.white70, fontSize: 12))]),
-            const SizedBox(height: 15),
-            Text('${hijri.day} ${hijriMonths[hijri.month]} ${hijri.year} هـ', style: const TextStyle(color: gold, fontSize: 14, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 12),
-            const Text('﴿ أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ ﴾', style: TextStyle(color: Colors.white, fontSize: 21, height: 1.9, fontWeight: FontWeight.w700)),
-            const Text('سورة الرعد · الآية 28', style: TextStyle(color: Colors.white70, fontSize: 12)),
-            const SizedBox(height: 18),
-            Row(children: [
-              Expanded(child: _HeroAction(icon: Icons.menu_book_rounded, label: 'ورد القرآن', onTap: () => _open(const QuranStandalonePage()))),
-              const SizedBox(width: 9),
-              Expanded(child: _HeroAction(icon: Icons.headphones_rounded, label: 'استمع للقرآن', onTap: () => _open(const RecitersPage()))),
-            ]),
-          ]),
+    ),
+        SizedBox(
+          height: 116,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: featuredReciters.length,
+            separatorBuilder: (_, __) => const SizedBox(width: 10),
+            itemBuilder: (context, index) => _ReciterSpotlightTile(
+              name: featuredReciters[index],
+              onTap: () => _open(RecitersPage(initialReciterName: featuredReciters[index])),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        const _PrayerCountdownCard(),
+        const SectionTitle('مساحتك الإيمانية'),
+        GridView.count(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          crossAxisCount: 3,
+          mainAxisSpacing: 11,
+          crossAxisSpacing: 11,
+          childAspectRatio: .92,
+          children: [
+            _HomeTile(icon: Icons.menu_book_rounded, title: 'القرآن الكريم', onTap: () => _open(const QuranStandalonePage()), accent: forest),
+            _HomeTile(icon: Icons.auto_stories_rounded, title: 'الأحاديث', onTap: () => _open(const HadithDuaPage()), accent: gold),
+            _HomeTile(icon: Icons.spa_rounded, title: 'الأذكار', onTap: () => _open(const AzkarStandalonePage()), accent: forest),
+            _HomeTile(icon: Icons.mosque_rounded, title: 'مواقيت الصلاة', onTap: () => _open(const PrayerStandalonePage()), accent: gold),
+            _HomeTile(icon: Icons.explore_rounded, title: 'القبلة', onTap: () => _open(const QiblaPage()), accent: forest),
+            _HomeTile(icon: Icons.volunteer_activism_rounded, title: 'الأدعية', onTap: () => _open(const HadithDuaPage(initialTab: 1)), accent: gold),
+            _HomeTile(icon: Icons.spa_rounded, title: 'السبحة', onTap: () => _open(const TasbihPage()), accent: forest),
+            _HomeTile(icon: Icons.calendar_month_rounded, title: 'التقويم الهجري', onTap: () => _open(const HijriPage()), accent: gold),
+            _HomeTile(icon: Icons.headphones_rounded, title: 'التلاوات', onTap: () => _open(const RecitersPage()), accent: forest),
+          ],
+        ),
+        const SectionTitle('ورد التسبيح اليومي'),
+        SCard(child: Row(children: [
+          Container(width: 48, height: 48, decoration: BoxDecoration(color: goldSoft, borderRadius: BorderRadius.circular(16), border: Border.all(color: gold.withValues(alpha: .2))), child: const Icon(Icons.spa_rounded, color: gold)),
+          const SizedBox(width: 12),
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('سبحتك اليوم', style: TextStyle(fontWeight: FontWeight.w800, color: deepGreen)), Text('$tasbih تسبيحة محفوظة', style: const TextStyle(color: Colors.white70, fontSize: 12))])),
+          FilledButton(onPressed: () => _open(const TasbihPage()), child: const Text('ابدأ الذكر')),
         ])),
-      const SectionTitle('مساحتك الإيمانية'),
-      GridView.count(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(), crossAxisCount: 3,
-        mainAxisSpacing: 10, crossAxisSpacing: 10, childAspectRatio: .92, children: [
-          _HomeTile(icon: Icons.menu_book_rounded, title: 'القرآن الكريم', onTap: () => _open(const QuranStandalonePage()), accent: forest),
-          _HomeTile(icon: Icons.auto_stories_rounded, title: 'الأحاديث', onTap: () => _open(const HadithDuaPage()), accent: gold),
-          _HomeTile(icon: Icons.spa_rounded, title: 'الأذكار', onTap: () => _open(const AzkarStandalonePage()), accent: forest),
-          _HomeTile(icon: Icons.mosque_rounded, title: 'مواقيت الصلاة', onTap: () => _open(const PrayerStandalonePage()), accent: forest),
-          _HomeTile(icon: Icons.explore_rounded, title: 'القبلة', onTap: () => _open(const QiblaPage()), accent: forest),
-          _HomeTile(icon: Icons.volunteer_activism_rounded, title: 'الأدعية', onTap: () => _open(const HadithDuaPage(initialTab: 1)), accent: gold),
-          _HomeTile(icon: Icons.spa_rounded, title: 'السبحة', onTap: () => _open(const TasbihPage()), accent: forest),
-          _HomeTile(icon: Icons.calendar_month_rounded, title: 'التقويم الهجري', onTap: () => _open(const HijriPage()), accent: gold),
-          _HomeTile(icon: Icons.headphones_rounded, title: 'التلاوات', onTap: () => _open(const RecitersPage()), accent: forest),
-        ]),
-      const SectionTitle('ورد التسبيح اليومي'),
-      SCard(child: Row(children: [
-        Container(width: 48, height: 48, decoration: BoxDecoration(color: goldSoft, borderRadius: BorderRadius.circular(16)), child: const Icon(Icons.spa_rounded, color: deepGreen)),
-        const SizedBox(width: 12), Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [const Text('سبحتك اليوم', style: TextStyle(fontWeight: FontWeight.w800, color: deepGreen)), Text('$tasbih تسبيحة محفوظة', style: const TextStyle(color: Colors.white70, fontSize: 12))])),
-        FilledButton(onPressed: () => _open(const TasbihPage()), child: const Text('ابدأ الذكر')),
-      ])),
-      const SectionTitle('دعاء اليوم'),
-      SCard(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('﴿ رَبَّنَا آتِنَا فِي الدُّنْيَا حَسَنَةً وَفِي الْآخِرَةِ حَسَنَةً وَقِنَا عَذَابَ النَّارِ ﴾', textAlign: TextAlign.center, style: TextStyle(fontSize: 19, height: 2, color: ink, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 8), const Align(alignment: Alignment.centerLeft, child: Text('سورة البقرة · 201', style: TextStyle(color: forest, fontWeight: FontWeight.w800, fontSize: 12))),
-      ])),
-      const SizedBox(height: 18),
-      const Center(child: Text('تطوير وإنتاج: عبد العزيز عوض بن ثابت · © 2026', style: TextStyle(color: Colors.white60, fontSize: 11))),
-    ]);
+        const SectionTitle('دعاء اليوم'),
+        SCard(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('﴿ رَبَّنَا آتِنَا فِي الدُّنْيَا حَسَنَةً وَفِي الْآخِرَةِ حَسَنَةً وَقِنَا عَذَابَ النَّارِ ﴾', textAlign: TextAlign.center, style: TextStyle(fontSize: 19, height: 2, color: ink, fontWeight: FontWeight.w600)),
+          const SizedBox(height: 8),
+          const Align(alignment: Alignment.centerLeft, child: Text('سورة البقرة · 201', style: TextStyle(color: gold, fontWeight: FontWeight.w800, fontSize: 12))),
+        ])),
+        const SizedBox(height: 22),
+        const Center(child: Text('تطوير وإنتاج: عبد العزيز عوض بن ثابت · © 2026', style: TextStyle(color: Colors.white54, fontSize: 11))),
+      ],
+    );
   }
+}
+
+class _SakinahLogoMark extends StatelessWidget {
+  final double size;
+  const _SakinahLogoMark({this.size = 54});
+  @override
+  Widget build(BuildContext context) => Container(
+    width: size,
+    height: size,
+    decoration: BoxDecoration(
+      gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xFF0B4D34), Color(0xFF092218)]),
+      borderRadius: BorderRadius.circular(size * .31),
+      border: Border.all(color: gold.withValues(alpha: .58), width: 1.1),
+      boxShadow: [BoxShadow(color: forest.withValues(alpha: .22), blurRadius: 18, offset: const Offset(0, 6))],
+    ),
+    child: Stack(alignment: Alignment.center, children: [
+      Icon(Icons.nightlight_round, color: gold, size: size * .49),
+      Positioned(top: size * .17, right: size * .19, child: Icon(Icons.auto_awesome, size: size * .13, color: const Color(0xFFFFE8A8))),
+    ]),
+  );
+}
+
+class _MosqueHeroCard extends StatelessWidget {
+  final String location;
+  final DateTime date;
+  final String hijriText;
+  final VoidCallback onRead;
+  final VoidCallback onListen;
+  const _MosqueHeroCard({required this.location, required this.date, required this.hijriText, required this.onRead, required this.onListen});
+
+  @override
+  Widget build(BuildContext context) => ClipRRect(
+    borderRadius: BorderRadius.circular(27),
+    child: Container(
+      height: 300,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(27),
+        border: Border.all(color: gold.withValues(alpha: .46), width: 1),
+        boxShadow: [BoxShadow(color: forest.withValues(alpha: .16), blurRadius: 24, offset: const Offset(0, 10))],
+      ),
+      child: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/images/sakinah_mosque_hero.png', fit: BoxFit.cover),
+        const DecoratedBox(decoration: BoxDecoration(gradient: LinearGradient(
+          begin: Alignment.topCenter, end: Alignment.bottomCenter,
+          colors: [Color(0x99030806), Color(0x33030806), Color(0xE6000805)],
+          stops: [0, .42, 1],
+        ))),
+        Padding(
+          padding: const EdgeInsets.all(19),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                const Icon(Icons.location_on_outlined, color: gold, size: 17),
+                const SizedBox(width: 5),
+                Text(location, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12)),
+                const Spacer(),
+                Text('${date.day}/${date.month}/${date.year} م', style: const TextStyle(color: Colors.white70, fontSize: 11)),
+              ]),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                decoration: BoxDecoration(color: Colors.black.withValues(alpha: .38), borderRadius: BorderRadius.circular(99), border: Border.all(color: gold.withValues(alpha: .4))),
+                child: Text(hijriText, style: const TextStyle(color: Color(0xFFFFDFA0), fontWeight: FontWeight.w800, fontSize: 12)),
+              ),
+              const SizedBox(height: 11),
+              const Text('﴿ أَلَا بِذِكْرِ اللَّهِ تَطْمَئِنُّ الْقُلُوبُ ﴾', textAlign: TextAlign.start,
+                style: TextStyle(color: Colors.white, fontSize: 22, height: 1.85, fontWeight: FontWeight.w800, shadows: [Shadow(color: Colors.black87, blurRadius: 8)])),
+              const Text('سورة الرعد · الآية 28', style: TextStyle(color: Colors.white70, fontSize: 11)),
+              const SizedBox(height: 16),
+              Row(children: [
+                Expanded(child: _HeroAction(icon: Icons.menu_book_rounded, label: 'ورد القرآن', onTap: onRead)),
+                const SizedBox(width: 9),
+                Expanded(child: _HeroAction(icon: Icons.headphones_rounded, label: 'استمع للقرآن', onTap: onListen)),
+              ]),
+            ],
+          ),
+        ),
+      ]),
+    ),
+  );
+}
+
+class _ReciterSpotlightTile extends StatelessWidget {
+  final String name;
+  final VoidCallback onTap;
+  const _ReciterSpotlightTile({required this.name, required this.onTap});
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    width: 102,
+    child: Material(
+      color: const Color(0xFF101512),
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(18),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 11),
+          decoration: BoxDecoration(borderRadius: BorderRadius.circular(18), border: Border.all(color: const Color(0xFF263A2E))),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Container(width: 45, height: 45, decoration: BoxDecoration(shape: BoxShape.circle, color: const Color(0xFF153425), border: Border.all(color: gold.withValues(alpha: .32))),
+              child: const Icon(Icons.graphic_eq_rounded, color: Color(0xFF69D49A), size: 24)),
+            const SizedBox(height: 7),
+            Text(name, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800, height: 1.25)),
+          ]),
+        ),
+      ),
+    ),
+  );
 }
 
 class _HeroAction extends StatelessWidget {
@@ -526,7 +757,7 @@ class _QuranPageState extends State<QuranPage> {
   Future<void> _check() async { final b=await QuranStore.hasFullQuran(); final prefs=await SharedPreferences.getInstance(); if(mounted)setState(() { full=b; lastSurah=prefs.getInt('quran_last_surah')??0; lastAyah=prefs.getInt('quran_last_ayah')??0; }); }
   Future<void> _download() async { setState(() { busy = true; error = null; progress = 0; }); try {await QuranStore.downloadFull(onProgress:(p){if(mounted)setState(()=>progress=p);}); if(mounted)setState(()=>full=true); _snack('تم حفظ نص القرآن الكريم كاملاً على جهازك');} catch(e){if(mounted)setState(()=>error=e.toString());} finally{if(mounted)setState(()=>busy=false);} }
   void _snack(String s)=>ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(s)));
-  @override Widget build(BuildContext context){final normalized=normalizeArabic(query); final filtered=surahs.where((s)=>normalizeArabic(s.name).contains(normalized)||s.number.toString()==query).toList(); return ListView(padding:const EdgeInsets.all(18),children:[Row(children:[const Expanded(child:Text('القرآن الكريم',style:TextStyle(fontSize:25,fontWeight:FontWeight.w900,color:deepGreen))),IconButton(tooltip:'البحث في القرآن',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>QuranSearchPage(onOpenSurah:(number)=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[number-1])))))),icon:const Icon(Icons.search,color:forest)),IconButton(tooltip:'علاماتي المحفوظة',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>BookmarksPage(onOpenSurah:(number)=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[number-1])))))),icon:const Icon(Icons.bookmark_outline,color:forest))]),const Text('كلام الله تعالى · 114 سورة',style:TextStyle(color:Colors.white70)),if(lastSurah>0)Padding(padding:const EdgeInsets.only(top:12),child:Card(child:ListTile(leading:const CircleAvatar(backgroundColor:mint,child:Icon(Icons.play_arrow_rounded,color:forest)),title:const Text('تابع آخر قراءة',style:TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('سورة ${surahs[lastSurah-1].name}${lastAyah > 0 ? ' · الآية $lastAyah' : ''}'),trailing:const Icon(Icons.chevron_left,color:forest),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[lastSurah-1])))))),const SizedBox(height:15),TextField(textDirection:TextDirection.rtl,decoration:InputDecoration(hintText:'ابحث عن سورة',prefixIcon:const Icon(Icons.search),filled:true,fillColor:const Color(0xFF101512),border:OutlineInputBorder(borderRadius:BorderRadius.circular(16),borderSide:BorderSide.none)),onChanged:(v)=>setState(()=>query=v)),const SizedBox(height:12),Container(padding:const EdgeInsets.all(14),decoration:BoxDecoration(color:mint,borderRadius:BorderRadius.circular(17)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[const Icon(Icons.download_for_offline_outlined,color:forest),const SizedBox(width:8),Expanded(child:Text(full?'نص القرآن محفوظ دون إنترنت':'نزّل نص القرآن كاملاً للعمل دون إنترنت',style:const TextStyle(fontWeight:FontWeight.bold,color:deepGreen))),if(full)const Icon(Icons.check_circle,color:forest)]),if(busy)Padding(padding:const EdgeInsets.only(top:10),child:LinearProgressIndicator(value:progress)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.red)),if(!full&&!busy)Align(alignment:Alignment.centerLeft,child:TextButton.icon(onPressed:_download,icon:const Icon(Icons.download),label:const Text('تنزيل القرآن كاملاً')))])),const SizedBox(height:8),for(final s in filtered) Card(child:ListTile(leading:CircleAvatar(backgroundColor:mint,foregroundColor:forest,child:Text('${s.number}')),title:Text(s.name,style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('${s.verses} آية · ${s.type}'),trailing:const Icon(Icons.chevron_left,color:forest),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:s)))),),const SizedBox(height:15),const Text('مصدر النص: AlQuran Cloud. يُعرض النص كما يرد من المصدر دون تعديل.',style:TextStyle(color:Colors.white60,fontSize:11))]);}
+  @override Widget build(BuildContext context){final normalized=normalizeArabic(query); final filtered=surahs.where((s)=>normalizeArabic(s.name).contains(normalized)||s.number.toString()==query).toList(); return ListView(padding: EdgeInsets.fromLTRB(18, 18, 18, 28 + MediaQuery.of(context).padding.bottom), children:[Row(children:[const Expanded(child:Text('القرآن الكريم',style:TextStyle(fontSize:25,fontWeight:FontWeight.w900,color:deepGreen))),IconButton(tooltip:'البحث في القرآن',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>QuranSearchPage(onOpenSurah:(number)=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[number-1])))))),icon:const Icon(Icons.search,color:forest)),IconButton(tooltip:'علاماتي المحفوظة',onPressed:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>BookmarksPage(onOpenSurah:(number)=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[number-1])))))),icon:const Icon(Icons.bookmark_outline,color:forest))]),const Text('كلام الله تعالى · 114 سورة',style:TextStyle(color:Colors.white70)),if(lastSurah>0)Padding(padding:const EdgeInsets.only(top:12),child:Card(child:ListTile(leading:const CircleAvatar(backgroundColor:mint,child:Icon(Icons.play_arrow_rounded,color:forest)),title:const Text('تابع آخر قراءة',style:TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('سورة ${surahs[lastSurah-1].name}${lastAyah > 0 ? ' · الآية $lastAyah' : ''}'),trailing:const Icon(Icons.chevron_left,color:forest),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:surahs[lastSurah-1])))))),const SizedBox(height:15),TextField(textDirection:TextDirection.rtl,decoration:InputDecoration(hintText:'ابحث عن سورة',prefixIcon:const Icon(Icons.search),filled:true,fillColor:const Color(0xFF101512),border:OutlineInputBorder(borderRadius:BorderRadius.circular(16),borderSide:BorderSide.none)),onChanged:(v)=>setState(()=>query=v)),const SizedBox(height:12),Container(padding:const EdgeInsets.all(14),decoration:BoxDecoration(color:mint,borderRadius:BorderRadius.circular(17)),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Row(children:[const Icon(Icons.download_for_offline_outlined,color:forest),const SizedBox(width:8),Expanded(child:Text(full?'نص القرآن محفوظ دون إنترنت':'نزّل نص القرآن كاملاً للعمل دون إنترنت',style:const TextStyle(fontWeight:FontWeight.bold,color:deepGreen))),if(full)const Icon(Icons.check_circle,color:forest)]),if(busy)Padding(padding:const EdgeInsets.only(top:10),child:LinearProgressIndicator(value:progress)),if(error!=null)Text(error!,style:const TextStyle(color:Colors.red)),if(!full&&!busy)Align(alignment:Alignment.centerLeft,child:TextButton.icon(onPressed:_download,icon:const Icon(Icons.download),label:const Text('تنزيل القرآن كاملاً')))])),const SizedBox(height:8),for(final s in filtered) Card(child:ListTile(leading:CircleAvatar(backgroundColor:mint,foregroundColor:forest,child:Text('${s.number}')),title:Text(s.name,style:const TextStyle(fontWeight:FontWeight.bold)),subtitle:Text('${s.verses} آية · ${s.type}'),trailing:const Icon(Icons.chevron_left,color:forest),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>SurahPage(surah:s)))),),const SizedBox(height:15),const Text('مصدر النص: AlQuran Cloud. يُعرض النص كما يرد من المصدر دون تعديل.',style:TextStyle(color:Colors.white60,fontSize:11))]);}
 }
 
 class SurahPage extends StatefulWidget {
@@ -666,126 +897,176 @@ class _TafsirPageState extends State<TafsirPage> {
   );
 }
 
+class ApprovedPrayerSchedule {
+  static const entries = <(String, int, int)>[
+    ('الفجر', 4, 31),
+    ('الشروق', 5, 46),
+    ('الظهر', 11, 30),
+    ('العصر', 14, 46),
+    ('المغرب', 17, 11),
+    ('العشاء', 18, 41),
+  ];
+
+  static List<MapEntry<String, DateTime>> forDate(DateTime date) => [
+    for (final item in entries)
+      MapEntry(item.$1, DateTime(date.year, date.month, date.day, item.$2, item.$3)),
+  ];
+
+  static MapEntry<String, DateTime> nextPrayer(DateTime now) {
+    final today = forDate(now);
+    for (final item in today.where((entry) => entry.key != 'الشروق')) {
+      if (!item.value.isBefore(now)) return item;
+    }
+    final tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
+    return MapEntry('الفجر', DateTime(tomorrow.year, tomorrow.month, tomorrow.day, 4, 31));
+  }
+
+  static String format(DateTime date) {
+    final hour24 = date.hour;
+    final hour12 = hour24 % 12 == 0 ? 12 : hour24 % 12;
+    final minute = date.minute.toString().padLeft(2, '0');
+    return '$hour12:$minute ${hour24 < 12 ? 'ص' : 'م'}';
+  }
+
+  static String remaining(DateTime time, DateTime now) {
+    final difference = time.difference(now);
+    final hours = difference.inHours;
+    final minutes = difference.inMinutes.remainder(60);
+    if (hours <= 0) return 'باقي $minutes دقيقة';
+    return 'باقي $hours ساعة و$minutes دقيقة';
+  }
+}
+
 class PrayerPage extends StatefulWidget {
   const PrayerPage({super.key});
-  @override
-  State<PrayerPage> createState() => _PrayerPageState();
+  @override State<PrayerPage> createState() => _PrayerPageState();
 }
 
 class _PrayerPageState extends State<PrayerPage> {
-  double lat = 14.5425, lon = 49.1242;
-  String place = 'المكلا (إعداد افتراضي)';
-  bool locating = false;
-  List<MapEntry<String, DateTime>> times = [];
-  MapEntry<String, DateTime>? nextPrayer;
   Timer? refreshTimer;
-  String? error;
 
   @override
   void initState() {
     super.initState();
-    _load();
-    refreshTimer = Timer.periodic(const Duration(minutes: 1), (_) => _calc());
-  }
-
-  @override
-  void dispose() { refreshTimer?.cancel(); super.dispose(); }
-
-  Future<void> _load() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() {
-      lat = prefs.getDouble('lat') ?? lat;
-      lon = prefs.getDouble('lon') ?? lon;
-      place = prefs.getString('city') ?? place;
+    refreshTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() {});
     });
-    _calc();
-  }
-
-  PrayerTimes _prayerTimes(DateTime date) {
-    final params = CalculationMethodParameters.muslimWorldLeague()..madhab = Madhab.shafi;
-    return PrayerTimes(coordinates: Coordinates(lat, lon), date: date, calculationParameters: params);
-  }
-
-  void _calc() {
-    try {
-      final now = DateTime.now();
-      final pt = _prayerTimes(now);
-      final todayTimes = <MapEntry<String, DateTime>>[
-        MapEntry('الفجر', pt.fajr.toLocal()),
-        MapEntry('الشروق', pt.sunrise.toLocal()),
-        MapEntry('الظهر', pt.dhuhr.toLocal()),
-        MapEntry('العصر', pt.asr.toLocal()),
-        MapEntry('المغرب', pt.maghrib.toLocal()),
-        MapEntry('العشاء', pt.isha.toLocal()),
-      ];
-      final actualPrayers = todayTimes.where((t) => t.key != 'الشروق').toList();
-      MapEntry<String, DateTime>? next;
-      for (final candidate in actualPrayers) {
-        if (candidate.value.isAfter(now)) { next = candidate; break; }
-      }
-      next ??= MapEntry('الفجر', _prayerTimes(now.add(const Duration(days: 1))).fajr.toLocal());
-      if (mounted) setState(() { times = todayTimes; nextPrayer = next; error = null; });
-    } catch (e) {
-      if (mounted) setState(() => error = 'تعذر حساب المواقيت: $e');
-    }
-  }
-
-  Future<void> _locate() async {
-    setState(() => locating = true);
-    try {
-      if (!await Geolocator.isLocationServiceEnabled()) throw Exception('فعّل خدمة الموقع في الهاتف');
-      var permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) permission = await Geolocator.requestPermission();
-      if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) throw Exception('لم يتم السماح بالوصول للموقع');
-      final pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.medium));
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble('lat', pos.latitude);
-      await prefs.setDouble('lon', pos.longitude);
-      await prefs.setString('city', 'موقعي الحالي');
-      if (!mounted) return;
-      setState(() { lat = pos.latitude; lon = pos.longitude; place = 'موقعي الحالي'; });
-      _calc();
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))));
-    } finally {
-      if (mounted) setState(() => locating = false);
-    }
-  }
-
-  String fmt(DateTime d) => '${d.hour.toString().padLeft(2, '0')}:${d.minute.toString().padLeft(2, '0')}';
-  String remaining(DateTime time) {
-    final duration = time.difference(DateTime.now());
-    final hours = duration.inHours;
-    final minutes = duration.inMinutes.remainder(60);
-    return hours > 0 ? 'باقي $hours ساعة و$minutes دقيقة' : 'باقي $minutes دقيقة';
   }
 
   @override
-  Widget build(BuildContext context) => ListView(padding: const EdgeInsets.all(18), children: [
-    const Text('مواقيت الصلاة', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w900, color: deepGreen)),
-    Text(place, style: const TextStyle(color: Colors.white70)),
-    const SizedBox(height: 12),
-    Container(padding: const EdgeInsets.all(19), decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFF073A29), Color(0xFF0D6942)]), borderRadius: BorderRadius.circular(23)), child: Column(children: [
-      const Icon(Icons.mosque, color: Colors.white, size: 38),
-      const SizedBox(height: 8),
-      Text(DateTime.now().toLocal().toString().split(' ').first, style: const TextStyle(color: Colors.white70)),
-      const Text('الصلاة القادمة', style: TextStyle(color: Colors.white70)),
-      Text(nextPrayer?.key ?? '—', style: const TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.w900)),
-      if (nextPrayer != null) Text(fmt(nextPrayer!.value), style: const TextStyle(color: Colors.white, fontSize: 25, fontWeight: FontWeight.bold)),
-      if (nextPrayer != null) Text(remaining(nextPrayer!.value), style: const TextStyle(color: Colors.white70)),
-    ])),
-    const SizedBox(height: 12),
-    if (error != null) Text(error!, style: const TextStyle(color: Colors.red)),
-    for (final t in times) Card(child: ListTile(
-      leading: CircleAvatar(backgroundColor: mint, child: Icon(Icons.access_time, color: forest)),
-      title: Text(t.key, style: const TextStyle(fontWeight: FontWeight.bold)),
-      trailing: Text(fmt(t.value), style: const TextStyle(fontSize: 18, color: deepGreen, fontWeight: FontWeight.bold)),
-    )),
-    const SizedBox(height: 8),
-    FilledButton.icon(onPressed: locating ? null : _locate, icon: const Icon(Icons.my_location), label: Text(locating ? 'جارٍ تحديد الموقع' : 'تحديد موقعي بدقة')),
-    const Text('طريقة الحساب: رابطة العالم الإسلامي · المذهب الشافعي. قد تختلف المواقيت دقائق حسب التقويم المحلي؛ راجع جهة الأوقاف أو المسجد في مدينتك.', style: TextStyle(color: Colors.white60, fontSize: 11, height: 1.6)),
-  ]);
+  void dispose() {
+    refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final next = ApprovedPrayerSchedule.nextPrayer(now);
+    final times = ApprovedPrayerSchedule.forDate(now);
+    return ListView(
+      padding: EdgeInsets.fromLTRB(18, 18, 18, 28 + MediaQuery.of(context).padding.bottom),
+      children: [
+        const Text('مواقيت الصلاة', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w900, color: deepGreen)),
+        const SizedBox(height: 4),
+        const Text('المكلا · المواقيت المعتمدة يدوياً', style: TextStyle(color: Colors.white70)),
+        const SizedBox(height: 14),
+        _PrayerCountdownCard(compact: false),
+        const SectionTitle('مواقيت اليوم'),
+        for (final item in times)
+          Card(
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: mint,
+                child: Icon(item.key == 'الشروق' ? Icons.wb_sunny_outlined : Icons.access_time_rounded,
+                    color: item.key == 'الشروق' ? gold : forest),
+              ),
+              title: Text(item.key, style: const TextStyle(fontWeight: FontWeight.bold)),
+              trailing: Text(ApprovedPrayerSchedule.format(item.value),
+                  style: const TextStyle(fontSize: 17, color: deepGreen, fontWeight: FontWeight.w900)),
+            ),
+          ),
+        const SizedBox(height: 10),
+        const Text(
+          'هذه هي المواقيت اليدوية التي اعتمدتها لسَكينة. تبقى ثابتة على الجهاز ولا تتغير بتغيير الموقع أو طريقة الحساب.',
+          style: TextStyle(color: Colors.white60, fontSize: 12, height: 1.7),
+        ),
+      ],
+    );
+  }
+}
+
+class _PrayerCountdownCard extends StatefulWidget {
+  final bool compact;
+  const _PrayerCountdownCard({this.compact = true});
+  @override State<_PrayerCountdownCard> createState() => _PrayerCountdownCardState();
+}
+
+class _PrayerCountdownCardState extends State<_PrayerCountdownCard> {
+  Timer? _timer;
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final next = ApprovedPrayerSchedule.nextPrayer(now);
+    final time = next.value;
+    return Container(
+      padding: EdgeInsets.all(widget.compact ? 17 : 21),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          begin: Alignment.topRight,
+          end: Alignment.bottomLeft,
+          colors: [Color(0xFF0C3928), Color(0xFF10251B), Color(0xFF0A1711)],
+        ),
+        borderRadius: BorderRadius.circular(23),
+        border: Border.all(color: gold.withValues(alpha: .34), width: 1),
+        boxShadow: [BoxShadow(color: forest.withValues(alpha: .12), blurRadius: 20, offset: const Offset(0, 8))],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: widget.compact ? 48 : 58,
+            height: widget.compact ? 48 : 58,
+            decoration: BoxDecoration(color: goldSoft, borderRadius: BorderRadius.circular(17), border: Border.all(color: gold.withValues(alpha: .35))),
+            child: Icon(Icons.mosque_rounded, color: gold, size: widget.compact ? 25 : 30),
+          ),
+          const SizedBox(width: 13),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('الصلاة القادمة', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 3),
+                Text(next.key, style: TextStyle(color: Colors.white, fontSize: widget.compact ? 20 : 25, fontWeight: FontWeight.w900)),
+                Text(ApprovedPrayerSchedule.remaining(time, now), style: const TextStyle(color: Color(0xFF9BDDB5), fontSize: 12, fontWeight: FontWeight.w700)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(ApprovedPrayerSchedule.format(time), style: TextStyle(color: gold, fontSize: widget.compact ? 18 : 22, fontWeight: FontWeight.w900)),
+              Text('${now.day}/${now.month}/${now.year}', style: const TextStyle(color: Colors.white54, fontSize: 10)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class AzkarPage extends StatefulWidget {
@@ -1095,7 +1376,7 @@ class _TasbihPageState extends State<TasbihPage> {
 class MorePage extends StatelessWidget {
   const MorePage({super.key});
   @override
-  Widget build(BuildContext context) => ListView(padding: const EdgeInsets.all(18), children: [
+  Widget build(BuildContext context) => ListView(padding: EdgeInsets.fromLTRB(18, 18, 18, 28 + MediaQuery.of(context).padding.bottom), children: [
     const Text('المزيد', style: TextStyle(fontSize: 25, fontWeight: FontWeight.w900, color: deepGreen)),
     const SizedBox(height: 12),
     _MoreTile(icon: Icons.checklist_rounded, title: 'متابعة عباداتي', subtitle: 'الصلوات والورد والعادات اليومية', page: const DailyWorshipPage()),
@@ -1103,7 +1384,7 @@ class MorePage extends StatelessWidget {
     _MoreTile(icon: Icons.search_rounded, title: 'البحث في القرآن', subtitle: 'ابحث داخل الآيات مع تطبيع الهمزات والتشكيل', page: QuranSearchPage(onOpenSurah: (number) => Navigator.push(context, MaterialPageRoute(builder: (_) => SurahPage(surah: surahs[number - 1]))))),
     _MoreTile(icon: Icons.bookmark_outline_rounded, title: 'علاماتي المحفوظة', subtitle: 'ارجع إلى الآيات التي حفظتها', page: BookmarksPage(onOpenSurah: (number) => Navigator.push(context, MaterialPageRoute(builder: (_) => SurahPage(surah: surahs[number - 1]))))),
     _MoreTile(icon: Icons.explore, title: 'اتجاه القبلة', subtitle: 'بوصلة نحو الكعبة', page: const QiblaPage()),
-    _MoreTile(icon: Icons.headphones, title: 'التلاوات الصوتية', subtitle: 'عشرة قراء · تنزيل واستماع دون إنترنت', page: const RecitersPage()),
+    _MoreTile(icon: Icons.headphones, title: 'التلاوات الصوتية', subtitle: 'قراء من مصادر صوتية متعددة · تنزيل واستماع دون إنترنت', page: const RecitersPage()),
     _MoreTile(icon: Icons.download_for_offline_rounded, title: 'إدارة التنزيلات', subtitle: 'إدارة التلاوات المحفوظة على الجهاز', page: const AudioDownloadsPage()),
     _MoreTile(icon: Icons.volume_up, title: 'الأذان الكامل', subtitle: 'تشغيل وتنزيل الأذان للاستماع دون إنترنت', page: const AdhanPage()),
     _MoreTile(icon: Icons.menu_book, title: 'الأحاديث والأدعية', subtitle: 'نصوص مختارة مع المراجع', page: const HadithDuaPage()),
@@ -1239,7 +1520,8 @@ class _DuaCatalogState extends State<_DuaCatalog> {
 }
 
 class RecitersPage extends StatefulWidget {
-  const RecitersPage({super.key});
+  final String? initialReciterName;
+  const RecitersPage({super.key, this.initialReciterName});
   @override State<RecitersPage> createState() => _RecitersPageState();
 }
 
@@ -1278,12 +1560,29 @@ class _RecitersPageState extends State<RecitersPage> {
   }
 
   Future<void> _loadSettings() async {
+    await AudioLibrary.loadRequestedReciters();
     final prefs = await SharedPreferences.getInstance();
-    final savedRaw = prefs.getString('selected_reciter') ?? edition;
+    final matchingReaders = widget.initialReciterName == null
+        ? <Map<String, String>>[]
+        : reciters.where((item) {
+            final actualName = normalizeArabic(item['name'] ?? '');
+            final requestedName = normalizeArabic(widget.initialReciterName!);
+            return actualName == requestedName || actualName.contains(requestedName) || requestedName.contains(actualName);
+          }).toList();
+    final requestedEdition = matchingReaders.isEmpty ? null : matchingReaders.first['edition'];
+    final savedRaw = requestedEdition ?? prefs.getString('selected_reciter') ?? edition;
     final saved = reciters.any((item) => item['edition'] == savedRaw) ? savedRaw : reciters.first['edition']!;
     if (saved != savedRaw) await prefs.setString('selected_reciter', saved);
     final savedSurah = (prefs.getInt('selected_surah') ?? surah).clamp(1, 114).toInt();
-    if (mounted) setState(() { edition = saved; surah = savedSurah; playing = player.playing; loadedKey = SakinahAudioEngine.loadedKey; });
+    if (mounted) setState(() {
+      edition = saved;
+      surah = savedSurah;
+      playing = player.playing;
+      loadedKey = SakinahAudioEngine.loadedKey;
+      if (widget.initialReciterName != null && requestedEdition == null) {
+        status = 'تعذر جلب رابط ${widget.initialReciterName} حالياً. تحقق من الإنترنت ثم أعد فتح قائمة القراء.';
+      }
+    });
     await _refreshDownloaded();
   }
 
@@ -1440,7 +1739,7 @@ class _RecitersPageState extends State<RecitersPage> {
       if (status != null) Container(margin: const EdgeInsets.only(top: 12), padding: const EdgeInsets.all(13), decoration: BoxDecoration(color: goldSoft, borderRadius: BorderRadius.circular(15)), child: Text(status!, style: const TextStyle(color: deepGreen, height: 1.5))),
       const SizedBox(height: 12),
       const Text('يُحفظ كل ملف داخل مساحة التطبيق الخاصة. عند انقطاع التنزيل، يمكن إعادة المحاولة لاستكمال الملف الجزئي متى دعم الخادم طلب الاستكمال.', style: TextStyle(color: Colors.white70, fontSize: 11, height: 1.7)),
-      const Text('مصدر روابط التلاوات: AlQuran Cloud CDN. حقوق التسجيلات لأصحابها؛ يرجى مراجعة شروط المصدر قبل إعادة النشر.', style: TextStyle(color: Colors.white60, fontSize: 11, height: 1.7)),
+      const Text('مصادر التلاوات: AlQuran Cloud وMP3Quran.net. التسجيلات لأصحابها؛ راجع شروط كل مصدر قبل إعادة النشر.', style: TextStyle(color: Colors.white60, fontSize: 11, height: 1.7)),
     ]),
   );
 
@@ -1598,9 +1897,9 @@ class HijriPage extends StatelessWidget{const HijriPage({super.key});@override W
 class SupportPage extends StatelessWidget{const SupportPage({super.key});Future<void> _copy(BuildContext context,String s)async{await Clipboard.setData(ClipboardData(text:s));if(context.mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('تم النسخ')));}@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('ادعم تطوير سكينة')),body:ListView(padding:const EdgeInsets.all(18),children:[Container(padding:const EdgeInsets.all(22),decoration:BoxDecoration(gradient:const LinearGradient(colors:[deepGreen,forest]),borderRadius:BorderRadius.circular(24)),child:const Column(children:[Icon(Icons.volunteer_activism,color:Colors.white,size:48),SizedBox(height:12),Text('ساهم في الخير',style:TextStyle(color:Colors.white,fontSize:25,fontWeight:FontWeight.w900)),SizedBox(height:8),Text('دعمك يساعدنا على مواصلة تطوير تطبيق سكينة وتحسين خدمات القرآن والأذكار ومواقيت الصلاة.',textAlign:TextAlign.center,style:TextStyle(color:Colors.white,height:1.7))])),const SizedBox(height:14),const SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('لماذا تدعم سكينة؟',style:TextStyle(fontSize:18,fontWeight:FontWeight.bold,color:deepGreen)),SizedBox(height:8),Text('• تطوير التطبيق وإضافة خدمات إسلامية جديدة\n• تحسين الأداء والصيانة\n• توفير محتوى موثوق\n• تغطية تكاليف الاستضافة والتطوير',style:TextStyle(height:1.9))])),const SizedBox(height:14),SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('بيانات المساهمة والتحويل',style:TextStyle(fontWeight:FontWeight.bold,fontSize:18,color:deepGreen)),const SizedBox(height:14),const Text('شركة المشقاص للصرافة',style:TextStyle(fontWeight:FontWeight.bold)),const SizedBox(height:10),_CopyRow(label:'اسم المستفيد',value:'عبد العزيز عوض',onCopy:()=>_copy(context,'عبد العزيز عوض')),_CopyRow(label:'رقم الحساب',value:'254264392',onCopy:()=>_copy(context,'254264392'))])),const SizedBox(height:14),const Text('الدعم اختياري تماماً، وجميع خدمات التطبيق متاحة دون اشتراط المساهمة. نسأل الله أن يبارك لكم ويجزيكم خيراً.',textAlign:TextAlign.center,style:TextStyle(color:Colors.white70,height:1.7)),const SizedBox(height:10),const Center(child:Text('تطوير وإنتاج: عبد العزيز عوض بن ثابت\n© 2026 سَكينة',textAlign:TextAlign.center,style:TextStyle(color:Colors.white60,fontSize:12)))]));}
 class _CopyRow extends StatelessWidget{final String label,value;final VoidCallback onCopy;const _CopyRow({required this.label,required this.value,required this.onCopy});@override Widget build(BuildContext context)=>Padding(padding:const EdgeInsets.symmetric(vertical:7),child:Row(children:[Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text(label,style:const TextStyle(color:Colors.white60,fontSize:12)),Text(value,style:const TextStyle(fontWeight:FontWeight.bold,fontSize:17))])),IconButton(onPressed:onCopy,icon:const Icon(Icons.copy,color:forest))]));}
 
-class SettingsPage extends StatelessWidget{const SettingsPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('الإعدادات')),body:ListView(padding:const EdgeInsets.all(18),children:[const SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('إعدادات الصلاة',style:TextStyle(fontWeight:FontWeight.bold,color:deepGreen,fontSize:18)),SizedBox(height:8),Text('طريقة الحساب الحالية: رابطة العالم الإسلامي. المذهب: الشافعي. يمكن أن تختلف النتائج دقائق عن التقويم الرسمي المحلي.') ])),const SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('الموقع',style:TextStyle(fontWeight:FontWeight.bold,color:deepGreen,fontSize:18)),SizedBox(height:8),Text('يستخدم التطبيق موقع الهاتف فقط لحساب أوقات الصلاة واتجاه القبلة. يمكنك رفض إذن الموقع والاستمرار بالإحداثيات الافتراضية للمكلا.')]))]));}
+class SettingsPage extends StatelessWidget{const SettingsPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('الإعدادات')),body:ListView(padding:const EdgeInsets.all(18),children:[const SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('إعدادات الصلاة',style:TextStyle(fontWeight:FontWeight.bold,color:deepGreen,fontSize:18)),SizedBox(height:8),Text('المواقيت اليدوية المعتمدة للمكلا: الفجر 04:31، الشروق 05:46، الظهر 11:30، العصر 14:46، المغرب 17:11، العشاء 18:41.') ])),const SCard(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[Text('الموقع',style:TextStyle(fontWeight:FontWeight.bold,color:deepGreen,fontSize:18)),SizedBox(height:8),Text('يستخدم التطبيق موقع الهاتف اختيارياً لتحديد اتجاه القبلة. مواقيت الصلاة اليدوية المعتمدة لا تحتاج إلى إذن الموقع.')]))]));}
 
-class AboutPage extends StatelessWidget{const AboutPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('عن سكينة والمصادر')),body:ListView(padding:const EdgeInsets.all(18),children:[const Text('سَكينة',style:TextStyle(fontSize:28,fontWeight:FontWeight.w900,color:deepGreen)),const Text('تطبيق إسلامي للقرآن والأذكار والصلاة والقبلة. لا يتطلب حساباً أو تسجيل دخول، ولا يحتوي على إعلانات أو أدوات تحليلات. تُحفظ العلامات والتقدم والإعدادات على الجهاز.'),const SectionTitle('الخصوصية'),const Text('إذن الموقع اختياري ويُستخدم محلياً لحساب مواقيت الصلاة واتجاه القبلة. يتصل التطبيق بمصادر المحتوى عند طلب النص أو الصوت، ولا يرسل سجل عبادات المستخدم أو علامات القرآن إلى خادم.',style:TextStyle(height:1.7)),const SectionTitle('مصادر المحتوى'),const Text('• نص القرآن والصوت: AlQuran Cloud — https://alquran.cloud/\n• مصدر تلاوات القرآن يخضع لحقوق أصحاب التسجيلات؛ التطبيق لا يعيد استضافة الملفات.\n• مواقيت الصلاة: مكتبة adhan_dart (MIT)، والحساب وفق رابطة العالم الإسلامي والمذهب الشافعي.\n• الأذان: Beautiful adhan.ogg — Adam-synagda، CC0 1.0 عبر Wikimedia Commons.\n• الأذكار والأحاديث مختارة مع إحالات إلى كتب الحديث المذكورة داخل الصفحات.',style:TextStyle(height:1.8)),const SectionTitle('ملاحظة علمية'),const Text('المواقيت تقديرية حسابياً وقد تختلف حسب الجهة المحلية. التاريخ الهجري تقريبي ويخضع لرؤية الهلال. راجع المصادر الشرعية المحلية عند الحاجة.',style:TextStyle(height:1.7)),const SectionTitle('الحقوق'),const Text('تطوير وإنتاج: عبد العزيز عوض بن ثابت\n© 2026 — سَكينة',style:TextStyle(height:1.8))]));}
+class AboutPage extends StatelessWidget{const AboutPage({super.key});@override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('عن سكينة والمصادر')),body:ListView(padding:const EdgeInsets.all(18),children:[const Text('سَكينة',style:TextStyle(fontSize:28,fontWeight:FontWeight.w900,color:deepGreen)),const Text('تطبيق إسلامي للقرآن والأذكار والصلاة والقبلة. لا يتطلب حساباً أو تسجيل دخول، ولا يحتوي على إعلانات أو أدوات تحليلات. تُحفظ العلامات والتقدم والإعدادات على الجهاز.'),const SectionTitle('الخصوصية'),const Text('إذن الموقع اختياري ويُستخدم محلياً لحساب مواقيت الصلاة واتجاه القبلة. يتصل التطبيق بمصادر المحتوى عند طلب النص أو الصوت، ولا يرسل سجل عبادات المستخدم أو علامات القرآن إلى خادم.',style:TextStyle(height:1.7)),const SectionTitle('مصادر المحتوى'),const Text('• نص القرآن وبعض التلاوات: AlQuran Cloud — https://alquran.cloud/\n• تلاوات القراء الإضافيين: فهرس MP3Quran API — https://mp3quran.net/\n• مصادر التلاوات تخضع لحقوق أصحاب التسجيلات؛ التطبيق لا يعيد استضافة الملفات.\n• مواقيت الصلاة: جدول يدوي معتمد للمكلا حسب الأوقات التي أدخلها المستخدم.\n• الأذان: Beautiful adhan.ogg — Adam-synagda، CC0 1.0 عبر Wikimedia Commons.\n• الأذكار والأحاديث مختارة مع إحالات إلى كتب الحديث المذكورة داخل الصفحات.',style:TextStyle(height:1.8)),const SectionTitle('ملاحظة علمية'),const Text('المواقيت ثابتة يدوياً وفق الجدول المعتمد للمكلا. التاريخ الهجري تقريبي ويخضع لرؤية الهلال. راجع المصادر الشرعية المحلية عند الحاجة.',style:TextStyle(height:1.7)),const SectionTitle('الحقوق'),const Text('تطوير وإنتاج: عبد العزيز عوض بن ثابت\n© 2026 — سَكينة',style:TextStyle(height:1.8))]));}
 
 class PrayerStandalonePage extends StatelessWidget{const PrayerStandalonePage({super.key});@override Widget build(BuildContext context)=>const Scaffold(body:SafeArea(child:PrayerPage()));}
 class QuranStandalonePage extends StatelessWidget{const QuranStandalonePage({super.key});@override Widget build(BuildContext context)=>const Scaffold(body:SafeArea(child:QuranPage()));}
