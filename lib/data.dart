@@ -370,9 +370,11 @@ const duas = <DuaItem>[
   DuaItem('دعاء العفو عند النسيان والخطأ', 'رَبَّنَا لَا تُؤَاخِذْنَا إِنْ نَسِينَا أَوْ أَخْطَأْنَا', 'سورة البقرة، الآية 286', category: 'أدعية من القرآن', topic: 'الهم والكرب'),
 ];
 
-// The AlQuran Cloud IDs and default bitrates below follow its published CDN catalogue.
-// Requested additional reciters are loaded from MP3Quran's public reciters API at runtime.
+// The AlQuran Cloud IDs and default bitrates below are retained as offline catalogue fallbacks.
+// The full Arabic reciter catalogue is loaded from MP3Quran API v3 when online.
 final reciters = <Map<String, String>>[
+  // Direct MP3Quran fallback for Ali Jaber (Hafs, complete 114-surah recitation).
+  {'name': 'علي جابر', 'edition': 'mp3quran_ali_jaber', 'bitrate': 'API', 'source': 'mp3quran_fallback'},
   {'name': 'مشاري العفاسي', 'edition': 'ar.alafasy', 'bitrate': '128', 'source': 'alquran'},
   {'name': 'سعود الشريم', 'edition': 'ar.shuraim', 'bitrate': '128', 'source': 'alquran'},
   {'name': 'عبدالرحمن السديس', 'edition': 'ar.sudais', 'bitrate': '192', 'source': 'alquran'},
